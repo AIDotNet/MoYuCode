@@ -7,7 +7,8 @@ public sealed record ProjectSessionDto(
     long DurationMs,
     SessionEventCountsDto EventCounts,
     SessionTokenUsageDto TokenUsage,
-    IReadOnlyList<SessionTimelineBucketDto> Timeline);
+    IReadOnlyList<SessionTimelineBucketDto> Timeline,
+    IReadOnlyList<SessionTraceSpanDto> Trace);
 
 public sealed record SessionEventCountsDto(
     int Message,
@@ -28,3 +29,9 @@ public sealed record SessionTimelineBucketDto(
     int AgentReasoning,
     int TokenCount,
     int Other);
+
+public sealed record SessionTraceSpanDto(
+    string Kind,
+    long DurationMs,
+    long TokenCount,
+    int EventCount);

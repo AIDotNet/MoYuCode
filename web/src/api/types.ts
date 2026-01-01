@@ -88,6 +88,8 @@ export type SessionEventCountsDto = {
   message: number
   functionCall: number
   agentReasoning: number
+  tokenCount: number
+  other: number
 }
 
 export type SessionTokenUsageDto = {
@@ -97,10 +99,24 @@ export type SessionTokenUsageDto = {
   reasoningOutputTokens: number
 }
 
+export type CodexDailyTokenUsageDto = {
+  date: string
+  tokenUsage: SessionTokenUsageDto
+}
+
 export type SessionTimelineBucketDto = {
   message: number
   functionCall: number
   agentReasoning: number
+  tokenCount: number
+  other: number
+}
+
+export type SessionTraceSpanDto = {
+  kind: string
+  durationMs: number
+  tokenCount: number
+  eventCount: number
 }
 
 export type ProjectSessionDto = {
@@ -111,6 +127,7 @@ export type ProjectSessionDto = {
   eventCounts: SessionEventCountsDto
   tokenUsage: SessionTokenUsageDto
   timeline: SessionTimelineBucketDto[]
+  trace?: SessionTraceSpanDto[]
 }
 
 export type DriveDto = {
@@ -140,4 +157,26 @@ export type ListEntriesResponse = {
   parentPath: string | null
   directories: DirectoryEntryDto[]
   files: FileEntryDto[]
+}
+
+export type RenameEntryRequest = {
+  path: string
+  newName: string
+}
+
+export type RenameEntryResponse = {
+  oldPath: string
+  newPath: string
+}
+
+export type CreateEntryKind = 'file' | 'directory'
+
+export type CreateEntryRequest = {
+  parentPath: string
+  name: string
+  kind: CreateEntryKind
+}
+
+export type CreateEntryResponse = {
+  fullPath: string
 }

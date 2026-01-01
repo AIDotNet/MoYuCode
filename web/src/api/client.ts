@@ -7,6 +7,12 @@ import type {
   ProjectDto,
   ProjectSessionDto,
   ProjectUpsertRequest,
+  CodexDailyTokenUsageDto,
+  SessionTokenUsageDto,
+  CreateEntryRequest,
+  CreateEntryResponse,
+  RenameEntryRequest,
+  RenameEntryResponse,
   ProviderDto,
   ProviderUpsertRequest,
   ToolKey,
@@ -74,6 +80,18 @@ export const api = {
   tools: {
     status: (tool: ToolKey) => http<ToolStatusDto>(`/api/tools/${tool}/status`),
     install: (tool: ToolKey) => http<JobDto>(`/api/tools/${tool}/install`, { method: 'POST' }),
+    codexTokenUsage: (forceRefresh = false) =>
+      http<SessionTokenUsageDto>(
+        `/api/tools/codex/token-usage${forceRefresh ? '?forceRefresh=true' : ''}`,
+      ),
+    codexTokenUsageDaily: (days = 7, forceRefresh = false) => {
+      const sp = new URLSearchParams()
+      sp.set('days', String(days))
+      if (forceRefresh) sp.set('forceRefresh', 'true')
+      return http<CodexDailyTokenUsageDto[]>(
+        `/api/tools/codex/token-usage/daily?${sp.toString()}`,
+      )
+    },
   },
   jobs: {
     get: (id: string) => http<JobDto>(`/api/jobs/${id}`),
@@ -110,6 +128,22 @@ export const api = {
       http<ListDirectoriesResponse>(`/api/fs/list?path=${encodeURIComponent(path)}`),
     listEntries: (path: string) =>
       http<ListEntriesResponse>(`/api/fs/entries?path=${encodeURIComponent(path)}`),
+    deleteEntry: (path: string) =>
+      http<void>(`/api/fs/entry?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+    renameEntry: (body: RenameEntryRequest) =>
+      http<RenameEntryResponse>(`/api/fs/rename`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    createEntry: (body: CreateEntryRequest) =>
+      http<CreateEntryResponse>(`/api/fs/create`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    revealInExplorer: (path: string) =>
+      http<void>(`/api/fs/reveal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+    openTerminal: (path: string) =>
+      http<void>(`/api/fs/terminal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
   },
 }
 

@@ -2,6 +2,8 @@ using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using OneCode.Api;
 using OneCode.Data;
+using OneCode.Services.A2a;
+using OneCode.Services.Codex;
 using OneCode.Services.Jobs;
 using OneCode.Services.Shell;
 
@@ -33,13 +35,18 @@ builder.Services.AddDbContext<OneCodeDbContext>(options =>
 });
 
 builder.Services.AddHttpClient();
+builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<JobManager>();
 builder.Services.AddSingleton<PowerShellLauncher>();
+builder.Services.AddSingleton<A2aTaskManager>();
+builder.Services.AddSingleton<CodexAppServerClient>();
+builder.Services.AddSingleton<CodexSessionManager>();
 
 var app = builder.Build();
 
 app.UseCors();
 app.MapOneCodeApis();
+app.MapA2a();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -50,7 +57,7 @@ if (app.Environment.IsDevelopment())
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<OneCodeDbContext>();
-    await db.Database.EnsureCreatedAsync();
+    await db.Database.MigrateAsync();
 }
 
 app.Run();

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { api, formatUtc } from '@/api/client'
 import type {
@@ -36,6 +37,17 @@ function emptyForm(): FormState {
   return { name: '', workspacePath: '', providerId: null, model: '' }
 }
 
+type BatchFormState = {
+  updateProvider: boolean
+  providerId: string | null
+  updateModel: boolean
+  model: string
+}
+
+function emptyBatchForm(): BatchFormState {
+  return { updateProvider: false, providerId: null, updateModel: false, model: '' }
+}
+
 export function ProjectsTab({ toolType }: { toolType: ToolType }) {
   const navigate = useNavigate()
   const [projects, setProjects] = useState<ProjectDto[]>([])
@@ -46,12 +58,28 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
   const [mountedActionsId, setMountedActionsId] = useState<string | null>(null)
   const [sessionsProject, setSessionsProject] = useState<ProjectDto | null>(null)
 
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null)
+  const actionsAnchorRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const [actionsMenuPos, setActionsMenuPos] = useState<{
+    top: number
+    left: number
+  } | null>(null)
+
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
+  const selectAllRef = useRef<HTMLInputElement | null>(null)
+
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<ProjectDto | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm())
 
+  const [batchEditOpen, setBatchEditOpen] = useState(false)
+  const [batchForm, setBatchForm] = useState<BatchFormState>(emptyBatchForm())
+
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ProjectDto | null>(null)
+
+  const [batchDeleteDialogOpen, setBatchDeleteDialogOpen] = useState(false)
 
   const [scanOpen, setScanOpen] = useState(false)
   const [scanRunning, setScanRunning] = useState(false)
@@ -81,6 +109,11 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
   }, [load])
 
   useEffect(() => {
+    const ids = new Set(projects.map((p) => p.id))
+    setSelectedIds((prev) => prev.filter((id) => ids.has(id)))
+  }, [projects])
+
+  useEffect(() => {
     if (openActionsId) {
       setMountedActionsId(openActionsId)
       return
@@ -98,6 +131,9 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
       const target = e.target as Element | null
       if (!target) return
 
+      const menu = actionsMenuRef.current
+      if (menu && menu.contains(target)) return
+
       const root = target.closest('[data-actions-id]')
       if (root && root.getAttribute('data-actions-id') === openActionsId) return
 
@@ -113,6 +149,26 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     return () => {
       document.removeEventListener('pointerdown', onPointerDown)
       document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [openActionsId])
+
+  useEffect(() => {
+    if (!openActionsId) return
+
+    const anchor = actionsAnchorRefs.current[openActionsId]
+    if (!anchor) return
+
+    const update = () => {
+      const rect = anchor.getBoundingClientRect()
+      setActionsMenuPos({ top: rect.bottom + 4, left: rect.right })
+    }
+
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
     }
   }, [openActionsId])
 
@@ -143,6 +199,29 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     scanLogEndRef.current?.scrollIntoView({ block: 'end' })
   }, [scanLogs, scanOpen])
 
+  const selectableProjectIds = useMemo(() => {
+    return projects.map((p) => p.id)
+  }, [projects])
+
+  const allSelected = useMemo(() => {
+    return (
+      selectableProjectIds.length > 0 &&
+      selectedIds.length === selectableProjectIds.length
+    )
+  }, [selectableProjectIds.length, selectedIds.length])
+
+  const someSelected = useMemo(() => {
+    return (
+      selectedIds.length > 0 &&
+      selectedIds.length < selectableProjectIds.length
+    )
+  }, [selectableProjectIds.length, selectedIds.length])
+
+  useEffect(() => {
+    if (!selectAllRef.current) return
+    selectAllRef.current.indeterminate = someSelected
+  }, [someSelected])
+
   const filteredProviders = useMemo(() => {
     if (toolType === 'Codex') {
       return providers.filter((p) => p.requestType !== 'Anthropic')
@@ -155,11 +234,38 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     return providers.find((p) => p.id === form.providerId) ?? null
   }, [form.providerId, providers])
 
+  const batchSelectedProvider = useMemo(() => {
+    if (!batchForm.providerId) return null
+    return providers.find((p) => p.id === batchForm.providerId) ?? null
+  }, [batchForm.providerId, providers])
+
   const openCreate = () => {
     setEditing(null)
     setForm(emptyForm())
     setModalOpen(true)
   }
+
+  const openBatchEdit = useCallback(() => {
+    if (!selectedIds.length) return
+    const selectedProjects = projects.filter((p) => selectedIdSet.has(p.id))
+    const first = selectedProjects[0]
+    if (!first) return
+
+    const sameProvider = selectedProjects.every(
+      (p) => p.providerId === first.providerId,
+    )
+    const sameModel = selectedProjects.every(
+      (p) => (p.model ?? '') === (first.model ?? ''),
+    )
+
+    setBatchForm({
+      updateProvider: false,
+      providerId: sameProvider ? first.providerId : null,
+      updateModel: false,
+      model: sameModel ? first.model ?? '' : '',
+    })
+    setBatchEditOpen(true)
+  }, [projects, selectedIdSet, selectedIds.length])
 
   const closeScanModal = useCallback(() => {
     scanEventSourceRef.current?.close()
@@ -245,6 +351,12 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     return true
   }, [form.name, form.workspacePath])
 
+  const canSubmitBatch = useMemo(() => {
+    if (!selectedIds.length) return false
+    if (!batchForm.updateProvider && !batchForm.updateModel) return false
+    return true
+  }, [batchForm.updateModel, batchForm.updateProvider, selectedIds.length])
+
   const submit = async () => {
     setLoading(true)
     setError(null)
@@ -263,6 +375,39 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
         await api.projects.create(payload)
       }
       setModalOpen(false)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitBatch = async () => {
+    if (!selectedIds.length) return
+    if (!batchForm.updateProvider && !batchForm.updateModel) return
+
+    setLoading(true)
+    setError(null)
+    try {
+      const selectedProjects = projects.filter((p) => selectedIdSet.has(p.id))
+
+      for (const p of selectedProjects) {
+        const payload: ProjectUpsertRequest = {
+          toolType,
+          name: p.name,
+          workspacePath: p.workspacePath,
+          providerId: batchForm.updateProvider ? batchForm.providerId : p.providerId,
+          model: batchForm.updateModel
+            ? batchForm.model.trim()
+              ? batchForm.model.trim()
+              : null
+            : p.model ?? null,
+        }
+        await api.projects.update(p.id, payload)
+      }
+
+      setBatchEditOpen(false)
       await load()
     } catch (e) {
       setError((e as Error).message)
@@ -297,6 +442,23 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     await remove(id)
   }
 
+  const removeSelected = async () => {
+    if (!selectedIds.length) return
+    setLoading(true)
+    setError(null)
+    try {
+      for (const id of selectedIds) {
+        await api.projects.delete(id)
+      }
+      setSelectedIds([])
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const start = async (id: string) => {
     setLoading(true)
     setError(null)
@@ -310,9 +472,34 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     }
   }
 
+  const startSelected = async () => {
+    if (!selectedIds.length) return
+    setLoading(true)
+    setError(null)
+    try {
+      for (const id of selectedIds) {
+        await api.projects.start(id)
+      }
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const modelDatalistId = useMemo(() => {
     return `models-${toolType}`
   }, [toolType])
+
+  const batchModelDatalistId = useMemo(() => {
+    return `models-batch-${toolType}`
+  }, [toolType])
+
+  const actionsProject = useMemo(() => {
+    if (!mountedActionsId) return null
+    return projects.find((p) => p.id === mountedActionsId) ?? null
+  }, [mountedActionsId, projects])
 
   if (sessionsProject) {
     return (
@@ -356,15 +543,76 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
       )}
 
       <div className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-3 text-sm font-medium">
-          项目列表 {loading ? '（处理中…）' : ''}
+        <div className="border-b px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-medium">
+              项目列表 {loading ? '（处理中…）' : ''}
+            </div>
+            {selectedIds.length ? (
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="text-xs text-muted-foreground">
+                  已选 {selectedIds.length}
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSelectedIds([])}
+                  disabled={loading}
+                >
+                  清空选择
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={openBatchEdit}
+                  disabled={loading}
+                >
+                  批量设置
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void startSelected()}
+                  disabled={loading}
+                >
+                  批量启动
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => setBatchDeleteDialogOpen(true)}
+                  disabled={loading}
+                >
+                  批量删除
+                </Button>
+              </div>
+            ) : null}
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[64rem] table-fixed text-sm">
             <thead className="text-muted-foreground">
               <tr className="border-b">
                 <th className="sticky left-0 z-20 w-[16rem] border-r bg-card px-4 py-2 text-left">
-                  名称
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={selectAllRef}
+                      type="checkbox"
+                      className="size-4 rounded border-input bg-background"
+                      aria-label="全选"
+                      checked={allSelected}
+                      disabled={!selectableProjectIds.length || loading}
+                      onChange={(e) => {
+                        const checked = e.target.checked
+                        setSelectedIds(checked ? selectableProjectIds : [])
+                      }}
+                    />
+                    <span>名称</span>
+                  </div>
                 </th>
                 <th className="px-4 py-2 text-left">工作空间</th>
                 <th className="w-[9rem] px-4 py-2 text-left whitespace-nowrap">
@@ -383,14 +631,34 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                 projects.map((p) => (
                   <tr key={p.id} className="border-b last:border-0">
                     <td className="sticky left-0 z-10 border-r bg-card px-4 py-2">
-                      <div className="truncate font-medium" title={p.name}>
-                        {p.name}
-                      </div>
-                      {p.lastStartedAtUtc ? (
-                        <div className="text-xs text-muted-foreground">
-                          上次启动：{formatUtc(p.lastStartedAtUtc)}
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 size-4 rounded border-input bg-background"
+                          aria-label={`选择 ${p.name}`}
+                          checked={selectedIdSet.has(p.id)}
+                          disabled={loading}
+                          onChange={(e) => {
+                            const checked = e.target.checked
+                            setSelectedIds((prev) => {
+                              if (checked) {
+                                return prev.includes(p.id) ? prev : [...prev, p.id]
+                              }
+                              return prev.filter((id) => id !== p.id)
+                            })
+                          }}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate font-medium" title={p.name}>
+                            {p.name}
+                          </div>
+                          {p.lastStartedAtUtc ? (
+                            <div className="text-xs text-muted-foreground">
+                              上次启动：{formatUtc(p.lastStartedAtUtc)}
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-2">
                       <div className="truncate" title={p.workspacePath}>
@@ -419,6 +687,9 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                       <div
                         className="relative inline-flex justify-end"
                         data-actions-id={p.id}
+                        ref={(el) => {
+                          actionsAnchorRefs.current[p.id] = el
+                        }}
                       >
                         <Button
                           type="button"
@@ -435,7 +706,17 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                           onClick={() => {
                             setOpenActionsId((current) => {
                               const next = current === p.id ? null : p.id
-                              if (next) setMountedActionsId(next)
+                              if (next) {
+                                setMountedActionsId(next)
+                                const anchor = actionsAnchorRefs.current[next]
+                                if (anchor) {
+                                  const rect = anchor.getBoundingClientRect()
+                                  setActionsMenuPos({
+                                    top: rect.bottom + 4,
+                                    left: rect.right,
+                                  })
+                                }
+                              }
                               return next
                             })
                           }}
@@ -443,82 +724,6 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                           <MoreHorizontal className="size-4" />
                           <span className="sr-only">操作</span>
                         </Button>
-
-                        {mountedActionsId === p.id ? (
-                          <div
-                            id={`project-actions-${p.id}`}
-                            role="menu"
-                            data-state={
-                              openActionsId === p.id ? 'open' : 'closed'
-                            }
-                            className={cn(
-                              'absolute right-0 top-full z-50 mt-1 w-36 origin-top-right rounded-md border bg-popover p-1 text-popover-foreground shadow-md',
-                              'data-[state=open]:animate-in data-[state=closed]:animate-out',
-                              'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-                              'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
-                              'duration-150',
-                              openActionsId !== p.id && 'pointer-events-none',
-                            )}
-                          >
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                              onClick={() => {
-                                setOpenActionsId(null)
-                                openProject(p.id)
-                              }}
-                            >
-                              打开
-                            </button>
-                            {toolType === 'Codex' ? (
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionsId(null)
-                                  setSessionsProject(p)
-                                }}
-                              >
-                                所有会话
-                              </button>
-                            ) : null}
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                              onClick={() => {
-                                setOpenActionsId(null)
-                                void start(p.id)
-                              }}
-                            >
-                              启动
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                              onClick={() => {
-                                setOpenActionsId(null)
-                                openEdit(p)
-                              }}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10"
-                              onClick={() => {
-                                setOpenActionsId(null)
-                                openRemove(p)
-                              }}
-                            >
-                              删除
-                            </button>
-                          </div>
-                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -534,6 +739,87 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
           </table>
         </div>
       </div>
+
+      {typeof document !== 'undefined' && actionsProject && actionsMenuPos
+        ? createPortal(
+            <div
+              id={`project-actions-${actionsProject.id}`}
+              ref={actionsMenuRef}
+              role="menu"
+              data-state={
+                openActionsId === actionsProject.id ? 'open' : 'closed'
+              }
+              className={cn(
+                'fixed z-50 w-36 origin-top-right -translate-x-full rounded-md border bg-popover p-1 text-popover-foreground shadow-md',
+                'data-[state=open]:animate-in data-[state=closed]:animate-out',
+                'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+                'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+                'duration-150',
+                openActionsId !== actionsProject.id && 'pointer-events-none',
+              )}
+              style={{ top: actionsMenuPos.top, left: actionsMenuPos.left }}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpenActionsId(null)
+                  openProject(actionsProject.id)
+                }}
+              >
+                打开
+              </button>
+              {toolType === 'Codex' ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                  onClick={() => {
+                    setOpenActionsId(null)
+                    setSessionsProject(actionsProject)
+                  }}
+                >
+                  所有会话
+                </button>
+              ) : null}
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpenActionsId(null)
+                  void start(actionsProject.id)
+                }}
+              >
+                启动
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpenActionsId(null)
+                  openEdit(actionsProject)
+                }}
+              >
+                编辑
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+                onClick={() => {
+                  setOpenActionsId(null)
+                  openRemove(actionsProject)
+                }}
+              >
+                删除
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
 
       <AlertDialog
         open={deleteDialogOpen}
@@ -555,6 +841,35 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
               disabled={loading}
               className={buttonVariants({ variant: 'destructive' })}
               onClick={() => void confirmRemove()}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={batchDeleteDialogOpen}
+        onOpenChange={(open) => {
+          setBatchDeleteDialogOpen(open)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认批量删除项目</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定删除已选的 {selectedIds.length} 个项目？此操作不可恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={loading}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={loading || !selectedIds.length}
+              className={buttonVariants({ variant: 'destructive' })}
+              onClick={() => {
+                setBatchDeleteDialogOpen(false)
+                void removeSelected()
+              }}
             >
               删除
             </AlertDialogAction>
@@ -646,6 +961,108 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
               type="button"
               onClick={() => void submit()}
               disabled={!canSubmit || loading}
+            >
+              保存
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={batchEditOpen}
+        title="批量设置"
+        onClose={() => setBatchEditOpen(false)}
+        className="max-w-3xl"
+      >
+        <div className="space-y-3">
+          <div className="text-xs text-muted-foreground">
+            将对已选的 {selectedIds.length} 个项目生效；未勾选的字段不会被修改。
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border-input bg-background"
+                  checked={batchForm.updateProvider}
+                  onChange={(e) =>
+                    setBatchForm((s) => ({ ...s, updateProvider: e.target.checked }))
+                  }
+                />
+                更新提供商
+              </label>
+              <select
+                className={cn(
+                  'h-9 w-full rounded-md border bg-background px-3 text-sm',
+                  !batchForm.updateProvider && 'opacity-60',
+                )}
+                disabled={!batchForm.updateProvider}
+                value={batchForm.providerId ?? ''}
+                onChange={(e) =>
+                  setBatchForm((s) => ({
+                    ...s,
+                    providerId: e.target.value ? e.target.value : null,
+                  }))
+                }
+              >
+                <option value="">默认配置</option>
+                {filteredProviders.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.requestType})
+                  </option>
+                ))}
+              </select>
+              {toolType === 'ClaudeCode' ? (
+                <div className="text-xs text-muted-foreground">
+                  Claude Code 仅支持 Anthropic 兼容提供商
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border-input bg-background"
+                  checked={batchForm.updateModel}
+                  onChange={(e) =>
+                    setBatchForm((s) => ({ ...s, updateModel: e.target.checked }))
+                  }
+                />
+                更新模型
+              </label>
+              <Input
+                disabled={!batchForm.updateModel}
+                list={
+                  batchSelectedProvider?.models?.length ? batchModelDatalistId : undefined
+                }
+                value={batchForm.model}
+                onChange={(e) => setBatchForm((s) => ({ ...s, model: e.target.value }))}
+                placeholder={
+                  batchForm.updateModel
+                    ? '留空表示清空模型'
+                    : '（未启用）'
+                }
+              />
+              {batchSelectedProvider?.models?.length ? (
+                <datalist id={batchModelDatalistId}>
+                  {batchSelectedProvider.models.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => setBatchEditOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void submitBatch()}
+              disabled={!canSubmitBatch || loading}
             >
               保存
             </Button>

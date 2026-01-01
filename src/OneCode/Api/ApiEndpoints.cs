@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using OneCode.Contracts.FileSystem;
 using OneCode.Contracts.Jobs;
 using OneCode.Contracts.Projects;
@@ -75,6 +76,24 @@ public static class ApiEndpoints
                 arguments: "install -g @anthropic-ai/claude-code");
             httpContext.Response.StatusCode = StatusCodes.Status202Accepted;
             return job;
+        });
+
+        tools.MapGet("/codex/token-usage", async (
+            bool forceRefresh,
+            IMemoryCache cache,
+            CancellationToken cancellationToken) =>
+        {
+            return await GetCodexTotalTokenUsageAsync(cache, forceRefresh, cancellationToken);
+        });
+
+        tools.MapGet("/codex/token-usage/daily", async (
+            int days,
+            bool forceRefresh,
+            IMemoryCache cache,
+            CancellationToken cancellationToken) =>
+        {
+            var normalizedDays = days <= 0 ? 7 : Math.Clamp(days, 1, 30);
+            return await GetCodexDailyTokenUsageAsync(cache, forceRefresh, normalizedDays, cancellationToken);
         });
     }
 
@@ -194,6 +213,293 @@ public static class ApiEndpoints
             }
 
             return new ListEntriesResponse(directoryInfo.FullName, parent, directories, files);
+        });
+
+        fs.MapDelete("/entry", (string path) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+            }
+
+            var normalizedPath = path.Trim();
+
+            if (File.Exists(normalizedPath))
+            {
+                try
+                {
+                    File.Delete(normalizedPath);
+                    return;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+                }
+                catch (Exception ex) when (ex is IOException or NotSupportedException)
+                {
+                    throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to delete file.");
+                }
+            }
+
+            if (Directory.Exists(normalizedPath))
+            {
+                try
+                {
+                    var directoryInfo = new DirectoryInfo(normalizedPath);
+                    if (directoryInfo.Parent is null)
+                    {
+                        throw new ApiHttpException(StatusCodes.Status400BadRequest, "Refusing to delete filesystem root.");
+                    }
+
+                    Directory.Delete(directoryInfo.FullName, recursive: true);
+                    return;
+                }
+                catch (ApiHttpException)
+                {
+                    throw;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+                }
+                catch (Exception ex) when (ex is IOException or NotSupportedException)
+                {
+                    throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to delete directory.");
+                }
+            }
+
+            throw new ApiHttpException(StatusCodes.Status404NotFound, "Entry not found.");
+        });
+
+        fs.MapPost("/rename", ([FromBody] RenameEntryRequest request) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path) || string.IsNullOrWhiteSpace(request.NewName))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path and NewName are required.");
+            }
+
+            var sourcePath = request.Path.Trim();
+            var newName = request.NewName.Trim();
+
+            if (newName is "." or "..")
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid new name.");
+            }
+
+            if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid new name.");
+            }
+
+            var isFile = File.Exists(sourcePath);
+            var isDirectory = !isFile && Directory.Exists(sourcePath);
+            if (!isFile && !isDirectory)
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Entry not found.");
+            }
+
+            var parentDirectory = Path.GetDirectoryName(sourcePath);
+            if (string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to resolve parent directory.");
+            }
+
+            var destinationPath = Path.Combine(parentDirectory, newName);
+            if (string.Equals(sourcePath, destinationPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return new RenameEntryResponse(sourcePath, destinationPath);
+            }
+
+            if (File.Exists(destinationPath) || Directory.Exists(destinationPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status409Conflict, "Destination already exists.");
+            }
+
+            try
+            {
+                if (isFile)
+                {
+                    File.Move(sourcePath, destinationPath);
+                }
+                else
+                {
+                    var directoryInfo = new DirectoryInfo(sourcePath);
+                    if (directoryInfo.Parent is null)
+                    {
+                        throw new ApiHttpException(StatusCodes.Status400BadRequest, "Refusing to rename filesystem root.");
+                    }
+
+                    Directory.Move(directoryInfo.FullName, destinationPath);
+                }
+            }
+            catch (ApiHttpException)
+            {
+                throw;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+            }
+            catch (Exception ex) when (ex is IOException or NotSupportedException)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to rename entry.");
+            }
+
+            return new RenameEntryResponse(sourcePath, destinationPath);
+        });
+
+        fs.MapPost("/create", ([FromBody] CreateEntryRequest request) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.ParentPath)
+                || string.IsNullOrWhiteSpace(request.Name)
+                || string.IsNullOrWhiteSpace(request.Kind))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "ParentPath, Name and Kind are required.");
+            }
+
+            var parentPath = request.ParentPath.Trim();
+            var name = request.Name.Trim();
+            var kind = request.Kind.Trim();
+
+            if (!Directory.Exists(parentPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Parent directory does not exist.");
+            }
+
+            if (name is "." or "..")
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid name.");
+            }
+
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid name.");
+            }
+
+            if (name.Contains(Path.DirectorySeparatorChar) || name.Contains(Path.AltDirectorySeparatorChar))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid name.");
+            }
+
+            var fullPath = Path.Combine(parentPath, name);
+
+            if (File.Exists(fullPath) || Directory.Exists(fullPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status409Conflict, "Destination already exists.");
+            }
+
+            try
+            {
+                if (kind.Equals("directory", StringComparison.OrdinalIgnoreCase))
+                {
+                    Directory.CreateDirectory(fullPath);
+                    return new CreateEntryResponse(fullPath);
+                }
+
+                if (kind.Equals("file", StringComparison.OrdinalIgnoreCase))
+                {
+                    using (new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                    }
+
+                    return new CreateEntryResponse(fullPath);
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+            }
+            catch (Exception ex) when (ex is IOException or NotSupportedException)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to create entry.");
+            }
+
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid kind.");
+        });
+
+        fs.MapPost("/reveal", (string path) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+            }
+
+            var normalizedPath = path.Trim();
+
+            var isFile = File.Exists(normalizedPath);
+            var isDirectory = !isFile && Directory.Exists(normalizedPath);
+            if (!isFile && !isDirectory)
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Entry not found.");
+            }
+
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    var arguments = isFile
+                        ? $"/select,\"{normalizedPath}\""
+                        : $"\"{normalizedPath}\"";
+
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = arguments,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    };
+
+                    Process.Start(startInfo);
+                    return;
+                }
+
+                var opener = OperatingSystem.IsMacOS() ? "open" : "xdg-open";
+                var unixStartInfo = new ProcessStartInfo
+                {
+                    FileName = opener,
+                    Arguments = $"\"{normalizedPath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                Process.Start(unixStartInfo);
+            }
+            catch
+            {
+                throw new ApiHttpException(StatusCodes.Status500InternalServerError, "Failed to open in file explorer.");
+            }
+        });
+
+        fs.MapPost("/terminal", (string path, PowerShellLauncher powerShellLauncher) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+            }
+
+            var normalizedPath = path.Trim();
+
+            string? workingDirectory = null;
+            if (Directory.Exists(normalizedPath))
+            {
+                workingDirectory = normalizedPath;
+            }
+            else if (File.Exists(normalizedPath))
+            {
+                workingDirectory = Path.GetDirectoryName(normalizedPath);
+            }
+
+            if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Entry not found.");
+            }
+
+            var directoryInfo = new DirectoryInfo(workingDirectory);
+            powerShellLauncher.LaunchNewWindow(
+                workingDirectory: directoryInfo.FullName,
+                windowTitle: $"OneCode - Terminal - {directoryInfo.Name}",
+                command: string.Empty,
+                environment: null);
         });
     }
 
@@ -806,7 +1112,7 @@ public static class ApiEndpoints
             var skippedMissingWorkspace = 0;
             var loggedExistingSkips = 0;
             var loggedMissingSkips = 0;
-            var loggedTruncations = 0;
+            var loggedNameConflicts = 0;
 
             await LogAsync("开始创建项目…");
 
@@ -850,10 +1156,16 @@ public static class ApiEndpoints
                 }
 
                 var name = BuildProjectNameFromCwd(workspacePath);
-                if (!string.Equals(name, workspacePath, StringComparison.Ordinal) && loggedTruncations < 5)
+                var uniqueName = EnsureUniqueProjectName(name, workspacePath, existingNameSet);
+                if (!string.Equals(uniqueName, name, StringComparison.OrdinalIgnoreCase))
                 {
-                    loggedTruncations++;
-                    await LogAsync($"cwd 过长，项目名已截断：{name}");
+                    if (loggedNameConflicts < 20)
+                    {
+                        loggedNameConflicts++;
+                        await LogAsync($"项目名冲突，已自动追加后缀：{name} -> {uniqueName}");
+                    }
+
+                    name = uniqueName;
                 }
 
                 if (existingNameSet.Contains(name))
@@ -938,6 +1250,417 @@ public static class ApiEndpoints
         Other = 4,
     }
 
+    private sealed record CodexTokenUsageSnapshot(
+        long InputTokens,
+        long CachedInputTokens,
+        long OutputTokens,
+        long ReasoningOutputTokens)
+    {
+        public long PrefillTokens => InputTokens + CachedInputTokens;
+        public long GenTokens => OutputTokens + ReasoningOutputTokens;
+        public long TotalTokens => PrefillTokens + GenTokens;
+    }
+
+    private const string CodexTotalTokenUsageCacheKey = "codex:token-usage:total:v1";
+    private static readonly SemaphoreSlim CodexTotalTokenUsageLock = new(1, 1);
+    private static string GetCodexDailyTokenUsageCacheKey(int days) =>
+        $"codex:token-usage:daily:{days}:v1";
+    private static readonly SemaphoreSlim CodexDailyTokenUsageLock = new(1, 1);
+
+    private static async Task<SessionTokenUsageDto> GetCodexTotalTokenUsageAsync(
+        IMemoryCache cache,
+        bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        if (!forceRefresh
+            && cache.TryGetValue(CodexTotalTokenUsageCacheKey, out SessionTokenUsageDto? cached)
+            && cached is not null)
+        {
+            return cached;
+        }
+
+        await CodexTotalTokenUsageLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!forceRefresh
+                && cache.TryGetValue(CodexTotalTokenUsageCacheKey, out cached)
+                && cached is not null)
+            {
+                return cached;
+            }
+
+            var computed = await ComputeCodexTotalTokenUsageAsync(cancellationToken);
+            cache.Set(
+                CodexTotalTokenUsageCacheKey,
+                computed,
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2),
+                });
+            return computed;
+        }
+        finally
+        {
+            CodexTotalTokenUsageLock.Release();
+        }
+    }
+
+    private static async Task<SessionTokenUsageDto> ComputeCodexTotalTokenUsageAsync(
+        CancellationToken cancellationToken)
+    {
+        var sessionsRoot = Path.Combine(GetCodexHomePath(), "sessions");
+        if (!Directory.Exists(sessionsRoot))
+        {
+            return new SessionTokenUsageDto(0, 0, 0, 0);
+        }
+
+        string[] jsonlFiles;
+        try
+        {
+            jsonlFiles = Directory.EnumerateFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            return new SessionTokenUsageDto(0, 0, 0, 0);
+        }
+
+        var inputTokens = 0L;
+        var cachedInputTokens = 0L;
+        var outputTokens = 0L;
+        var reasoningOutputTokens = 0L;
+
+        foreach (var filePath in jsonlFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var usage = await TryReadCodexSessionTokenUsageAsync(filePath, cancellationToken);
+            if (usage is null || usage.TotalTokens <= 0)
+            {
+                continue;
+            }
+
+            inputTokens += usage.InputTokens;
+            cachedInputTokens += usage.CachedInputTokens;
+            outputTokens += usage.OutputTokens;
+            reasoningOutputTokens += usage.ReasoningOutputTokens;
+        }
+
+        return new SessionTokenUsageDto(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+    }
+
+    private static async Task<IReadOnlyList<CodexDailyTokenUsageDto>> GetCodexDailyTokenUsageAsync(
+        IMemoryCache cache,
+        bool forceRefresh,
+        int days,
+        CancellationToken cancellationToken)
+    {
+        days = Math.Clamp(days, 1, 30);
+        var cacheKey = GetCodexDailyTokenUsageCacheKey(days);
+
+        if (!forceRefresh
+            && cache.TryGetValue(cacheKey, out IReadOnlyList<CodexDailyTokenUsageDto>? cached)
+            && cached is not null)
+        {
+            return cached;
+        }
+
+        await CodexDailyTokenUsageLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!forceRefresh
+                && cache.TryGetValue(cacheKey, out cached)
+                && cached is not null)
+            {
+                return cached;
+            }
+
+            var computed = await ComputeCodexDailyTokenUsageAsync(days, cancellationToken);
+            cache.Set(
+                cacheKey,
+                computed,
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2),
+                });
+            return computed;
+        }
+        finally
+        {
+            CodexDailyTokenUsageLock.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<CodexDailyTokenUsageDto>> ComputeCodexDailyTokenUsageAsync(
+        int days,
+        CancellationToken cancellationToken)
+    {
+        days = Math.Clamp(days, 1, 30);
+
+        var today = DateOnly.FromDateTime(DateTimeOffset.Now.ToLocalTime().DateTime);
+        var startDay = today.AddDays(-(days - 1));
+
+        var sessionsRoot = Path.Combine(GetCodexHomePath(), "sessions");
+        if (!Directory.Exists(sessionsRoot))
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        string[] jsonlFiles;
+        try
+        {
+            jsonlFiles = Directory.EnumerateFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        if (jsonlFiles.Length == 0)
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        var inputTokens = new long[days];
+        var cachedInputTokens = new long[days];
+        var outputTokens = new long[days];
+        var reasoningOutputTokens = new long[days];
+
+        foreach (var filePath in jsonlFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await AccumulateCodexDailyTokenUsageFromSessionAsync(
+                filePath,
+                startDay,
+                today,
+                inputTokens,
+                cachedInputTokens,
+                outputTokens,
+                reasoningOutputTokens,
+                cancellationToken);
+        }
+
+        var items = new List<CodexDailyTokenUsageDto>(days);
+        for (var i = 0; i < days; i++)
+        {
+            var day = startDay.AddDays(i);
+            items.Add(new CodexDailyTokenUsageDto(
+                Date: day.ToString("yyyy-MM-dd"),
+                TokenUsage: new SessionTokenUsageDto(
+                    inputTokens[i],
+                    cachedInputTokens[i],
+                    outputTokens[i],
+                    reasoningOutputTokens[i])));
+        }
+
+        return items;
+    }
+
+    private static IReadOnlyList<CodexDailyTokenUsageDto> BuildEmptyCodexDailyTokenUsage(
+        int days,
+        DateOnly startDay)
+    {
+        var items = new List<CodexDailyTokenUsageDto>(days);
+        for (var i = 0; i < days; i++)
+        {
+            var day = startDay.AddDays(i);
+            items.Add(new CodexDailyTokenUsageDto(
+                Date: day.ToString("yyyy-MM-dd"),
+                TokenUsage: new SessionTokenUsageDto(0, 0, 0, 0)));
+        }
+
+        return items;
+    }
+
+    private static async Task AccumulateCodexDailyTokenUsageFromSessionAsync(
+        string filePath,
+        DateOnly startDay,
+        DateOnly endDay,
+        long[] inputTokens,
+        long[] cachedInputTokens,
+        long[] outputTokens,
+        long[] reasoningOutputTokens,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            CodexTokenUsageSnapshot? lastTotalTokenUsage = null;
+
+            await using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+
+                if (!TryReadTimestamp(root, out var timestamp))
+                {
+                    continue;
+                }
+
+                if (!root.TryGetProperty("payload", out var payload)
+                    || payload.ValueKind != JsonValueKind.Object
+                    || !payload.TryGetProperty("type", out var payloadTypeProp)
+                    || payloadTypeProp.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var payloadType = payloadTypeProp.GetString();
+                if (!string.Equals(payloadType, "token_count", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!TryReadCodexTotalTokenUsage(payload, out var totalUsage))
+                {
+                    continue;
+                }
+
+                CodexTokenUsageSnapshot delta;
+                if (lastTotalTokenUsage is null)
+                {
+                    delta = totalUsage;
+                }
+                else
+                {
+                    delta = new CodexTokenUsageSnapshot(
+                        InputTokens: Math.Max(0, totalUsage.InputTokens - lastTotalTokenUsage.InputTokens),
+                        CachedInputTokens: Math.Max(0, totalUsage.CachedInputTokens - lastTotalTokenUsage.CachedInputTokens),
+                        OutputTokens: Math.Max(0, totalUsage.OutputTokens - lastTotalTokenUsage.OutputTokens),
+                        ReasoningOutputTokens: Math.Max(0, totalUsage.ReasoningOutputTokens - lastTotalTokenUsage.ReasoningOutputTokens));
+                }
+
+                lastTotalTokenUsage = totalUsage;
+
+                if (delta.TotalTokens <= 0)
+                {
+                    continue;
+                }
+
+                var localDay = DateOnly.FromDateTime(timestamp.ToLocalTime().DateTime);
+                if (localDay < startDay || localDay > endDay)
+                {
+                    continue;
+                }
+
+                var idx = localDay.DayNumber - startDay.DayNumber;
+                if ((uint)idx >= (uint)inputTokens.Length)
+                {
+                    continue;
+                }
+
+                inputTokens[idx] += delta.InputTokens;
+                cachedInputTokens[idx] += delta.CachedInputTokens;
+                outputTokens[idx] += delta.OutputTokens;
+                reasoningOutputTokens[idx] += delta.ReasoningOutputTokens;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // ignore
+        }
+    }
+
+    private static async Task<CodexTokenUsageSnapshot?> TryReadCodexSessionTokenUsageAsync(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var inputTokens = 0L;
+            var cachedInputTokens = 0L;
+            var outputTokens = 0L;
+            var reasoningOutputTokens = 0L;
+
+            CodexTokenUsageSnapshot? lastTotalTokenUsage = null;
+
+            await using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("payload", out var payload)
+                    || payload.ValueKind != JsonValueKind.Object
+                    || !payload.TryGetProperty("type", out var payloadTypeProp)
+                    || payloadTypeProp.ValueKind != JsonValueKind.String
+                    || !string.Equals(payloadTypeProp.GetString(), "token_count", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!TryReadCodexTotalTokenUsage(payload, out var totalUsage))
+                {
+                    continue;
+                }
+
+                CodexTokenUsageSnapshot delta;
+                if (lastTotalTokenUsage is null)
+                {
+                    delta = totalUsage;
+                }
+                else
+                {
+                    delta = new CodexTokenUsageSnapshot(
+                        InputTokens: Math.Max(0, totalUsage.InputTokens - lastTotalTokenUsage.InputTokens),
+                        CachedInputTokens: Math.Max(0, totalUsage.CachedInputTokens - lastTotalTokenUsage.CachedInputTokens),
+                        OutputTokens: Math.Max(0, totalUsage.OutputTokens - lastTotalTokenUsage.OutputTokens),
+                        ReasoningOutputTokens: Math.Max(0, totalUsage.ReasoningOutputTokens - lastTotalTokenUsage.ReasoningOutputTokens));
+                }
+
+                lastTotalTokenUsage = totalUsage;
+
+                if (delta.TotalTokens <= 0)
+                {
+                    continue;
+                }
+
+                inputTokens += delta.InputTokens;
+                cachedInputTokens += delta.CachedInputTokens;
+                outputTokens += delta.OutputTokens;
+                reasoningOutputTokens += delta.ReasoningOutputTokens;
+            }
+
+            return new CodexTokenUsageSnapshot(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
     private static async Task<CodexSessionMeta?> TryReadCodexSessionMetaAsync(
         string filePath,
         CancellationToken cancellationToken)
@@ -995,6 +1718,7 @@ public static class ApiEndpoints
         try
         {
             var startAt = meta.CreatedAtUtc;
+            var minEventAt = startAt;
             var lastEventAt = startAt;
 
             var messageCount = 0;
@@ -1009,6 +1733,12 @@ public static class ApiEndpoints
             var reasoningOutputTokens = 0L;
 
             var events = new List<(DateTimeOffset Timestamp, CodexSessionEventKind Kind)>();
+            var userMessageTimes = new List<DateTimeOffset>();
+            var assistantMessageTimes = new List<DateTimeOffset>();
+            var toolStartByCallId = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            var toolIntervals = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+            CodexTokenUsageSnapshot? lastTotalTokenUsage = null;
+            var tokenDeltas = new List<(DateTimeOffset Timestamp, CodexTokenUsageSnapshot Delta)>();
 
             await using var stream = File.OpenRead(filePath);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
@@ -1035,22 +1765,109 @@ public static class ApiEndpoints
                     continue;
                 }
 
+                if (timestamp < minEventAt)
+                {
+                    minEventAt = timestamp;
+                }
+
                 if (timestamp > lastEventAt)
                 {
                     lastEventAt = timestamp;
                 }
 
-                var kind = GetCodexSessionEventKind(root);
-                if (kind == CodexSessionEventKind.TokenCount)
+                if (root.TryGetProperty("payload", out var payload)
+                    && payload.ValueKind == JsonValueKind.Object
+                    && payload.TryGetProperty("type", out var payloadTypeProp)
+                    && payloadTypeProp.ValueKind == JsonValueKind.String)
                 {
-                    TryAccumulateCodexTokenUsage(
-                        root,
-                        ref inputTokens,
-                        ref cachedInputTokens,
-                        ref outputTokens,
-                        ref reasoningOutputTokens);
+                    var payloadType = payloadTypeProp.GetString();
+                    if (string.Equals(payloadType, "message", StringComparison.Ordinal)
+                        && payload.TryGetProperty("role", out var roleProp)
+                        && roleProp.ValueKind == JsonValueKind.String)
+                    {
+                        var role = roleProp.GetString();
+                        if (string.Equals(role, "user", StringComparison.Ordinal))
+                        {
+                            userMessageTimes.Add(timestamp);
+                        }
+                        else if (string.Equals(role, "assistant", StringComparison.Ordinal))
+                        {
+                            assistantMessageTimes.Add(timestamp);
+                        }
+                    }
+                    else if (string.Equals(payloadType, "user_message", StringComparison.Ordinal))
+                    {
+                        userMessageTimes.Add(timestamp);
+                    }
+                    else if (string.Equals(payloadType, "agent_message", StringComparison.Ordinal))
+                    {
+                        assistantMessageTimes.Add(timestamp);
+                    }
+                    else if (string.Equals(payloadType, "function_call", StringComparison.Ordinal)
+                        || string.Equals(payloadType, "custom_tool_call", StringComparison.Ordinal))
+                    {
+                        if (payload.TryGetProperty("call_id", out var callIdProp)
+                            && callIdProp.ValueKind == JsonValueKind.String)
+                        {
+                            var callId = callIdProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(callId))
+                            {
+                                toolStartByCallId[callId!] = timestamp;
+                            }
+                        }
+                    }
+                    else if (string.Equals(payloadType, "function_call_output", StringComparison.Ordinal)
+                        || string.Equals(payloadType, "custom_tool_call_output", StringComparison.Ordinal))
+                    {
+                        if (payload.TryGetProperty("call_id", out var callIdProp)
+                            && callIdProp.ValueKind == JsonValueKind.String)
+                        {
+                            var callId = callIdProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(callId)
+                                && toolStartByCallId.TryGetValue(callId!, out var toolStart))
+                            {
+                                if (timestamp > toolStart)
+                                {
+                                    toolIntervals.Add((toolStart, timestamp));
+                                }
+
+                                toolStartByCallId.Remove(callId!);
+                            }
+                        }
+                    }
+                    else if (string.Equals(payloadType, "token_count", StringComparison.Ordinal))
+                    {
+                        if (TryReadCodexTotalTokenUsage(payload, out var totalUsage))
+                        {
+                            CodexTokenUsageSnapshot delta;
+                            if (lastTotalTokenUsage is null)
+                            {
+                                delta = totalUsage;
+                            }
+                            else
+                            {
+                                delta = new CodexTokenUsageSnapshot(
+                                    InputTokens: Math.Max(0, totalUsage.InputTokens - lastTotalTokenUsage.InputTokens),
+                                    CachedInputTokens: Math.Max(0, totalUsage.CachedInputTokens - lastTotalTokenUsage.CachedInputTokens),
+                                    OutputTokens: Math.Max(0, totalUsage.OutputTokens - lastTotalTokenUsage.OutputTokens),
+                                    ReasoningOutputTokens: Math.Max(0, totalUsage.ReasoningOutputTokens - lastTotalTokenUsage.ReasoningOutputTokens));
+                            }
+
+                            lastTotalTokenUsage = totalUsage;
+
+                            if (delta.TotalTokens > 0)
+                            {
+                                tokenDeltas.Add((timestamp, delta));
+                                inputTokens += delta.InputTokens;
+                                cachedInputTokens += delta.CachedInputTokens;
+                                outputTokens += delta.OutputTokens;
+                                reasoningOutputTokens += delta.ReasoningOutputTokens;
+                            }
+                        }
+                    }
                 }
 
+                var kind = GetCodexSessionEventKind(root);
                 events.Add((timestamp, kind));
                 switch (kind)
                 {
@@ -1072,10 +1889,19 @@ public static class ApiEndpoints
                 }
             }
 
+            startAt = minEventAt;
+
             var duration = lastEventAt - startAt;
             var durationMs = duration <= TimeSpan.Zero ? 0 : (long)duration.TotalMilliseconds;
 
             var timeline = BuildTimeline(events, startAt, lastEventAt);
+            var trace = BuildTrace(
+                startAt,
+                lastEventAt,
+                userMessageTimes,
+                assistantMessageTimes,
+                toolIntervals,
+                tokenDeltas);
             return new ProjectSessionDto(
                 Id: meta.Id,
                 CreatedAtUtc: startAt,
@@ -1083,7 +1909,8 @@ public static class ApiEndpoints
                 DurationMs: durationMs,
                 EventCounts: new SessionEventCountsDto(messageCount, functionCallCount, reasoningCount, tokenCount, otherCount),
                 TokenUsage: new SessionTokenUsageDto(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens),
-                Timeline: timeline);
+                Timeline: timeline,
+                Trace: trace);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -1185,6 +2012,757 @@ public static class ApiEndpoints
         return buckets;
     }
 
+    private static IReadOnlyList<SessionTraceSpanDto> BuildTraceLegacy(
+        DateTimeOffset startAt,
+        DateTimeOffset lastEventAt,
+        IReadOnlyList<DateTimeOffset> userMessageTimes,
+        IReadOnlyList<DateTimeOffset> assistantMessageTimes,
+        IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> toolIntervals,
+        IReadOnlyList<(DateTimeOffset Timestamp, CodexTokenUsageSnapshot Usage)> tokenSnapshots)
+    {
+        var duration = lastEventAt - startAt;
+        if (duration <= TimeSpan.Zero)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        const string kindTool = "tool";
+        const string kindWaiting = "waiting";
+        const string kindNetwork = "network";
+        const string kindPrefill = "prefill";
+        const string kindGen = "gen";
+
+        const long networkOverheadMsPerRequest = 400;
+        const double prefillTokensPerSecond = 3000;
+        const double genTokensPerSecond = 50;
+
+        static bool Overlaps(DateTimeOffset startA, DateTimeOffset endA, DateTimeOffset startB, DateTimeOffset endB)
+        {
+            return startA < endB && endA > startB;
+        }
+
+        static List<(DateTimeOffset Start, DateTimeOffset End)> NormalizeIntervals(
+            IEnumerable<(DateTimeOffset Start, DateTimeOffset End)> intervals,
+            DateTimeOffset min,
+            DateTimeOffset max)
+        {
+            var list = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+            foreach (var (start, end) in intervals)
+            {
+                var clampedStart = start < min ? min : start;
+                var clampedEnd = end > max ? max : end;
+                if (clampedEnd <= clampedStart)
+                {
+                    continue;
+                }
+
+                list.Add((clampedStart, clampedEnd));
+            }
+
+            list.Sort((a, b) => a.Start.CompareTo(b.Start));
+            return list;
+        }
+
+        static List<(DateTimeOffset Start, DateTimeOffset End)> MergeIntervals(
+            List<(DateTimeOffset Start, DateTimeOffset End)> intervals)
+        {
+            if (intervals.Count <= 1)
+            {
+                return intervals;
+            }
+
+            var merged = new List<(DateTimeOffset Start, DateTimeOffset End)>(intervals.Count);
+            var currentStart = intervals[0].Start;
+            var currentEnd = intervals[0].End;
+
+            for (var idx = 1; idx < intervals.Count; idx++)
+            {
+                var next = intervals[idx];
+                if (next.Start <= currentEnd)
+                {
+                    if (next.End > currentEnd)
+                    {
+                        currentEnd = next.End;
+                    }
+
+                    continue;
+                }
+
+                merged.Add((currentStart, currentEnd));
+                currentStart = next.Start;
+                currentEnd = next.End;
+            }
+
+            merged.Add((currentStart, currentEnd));
+            return merged;
+        }
+
+        var toolsRaw = NormalizeIntervals(toolIntervals, startAt, lastEventAt);
+        var tools = MergeIntervals(toolsRaw);
+
+        var users = userMessageTimes
+            .Where(t => t >= startAt && t <= lastEventAt)
+            .OrderBy(t => t)
+            .ToArray();
+
+        var assistants = assistantMessageTimes
+            .Where(t => t >= startAt && t <= lastEventAt)
+            .OrderBy(t => t)
+            .ToArray();
+
+        var windows = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+        var assistantIdx = 0;
+        foreach (var userAt in users)
+        {
+            while (assistantIdx < assistants.Length && assistants[assistantIdx] <= userAt)
+            {
+                assistantIdx++;
+            }
+
+            if (assistantIdx >= assistants.Length)
+            {
+                break;
+            }
+
+            var assistantAt = assistants[assistantIdx];
+            assistantIdx++;
+
+            if (assistantAt <= userAt)
+            {
+                continue;
+            }
+
+            windows.Add((userAt, assistantAt));
+        }
+
+        windows = NormalizeIntervals(windows, startAt, lastEventAt);
+
+        var cutPoints = new List<DateTimeOffset>(2 + tools.Count * 2 + windows.Count * 2);
+        cutPoints.Add(startAt);
+        cutPoints.Add(lastEventAt);
+
+        foreach (var (start, end) in tools)
+        {
+            cutPoints.Add(start);
+            cutPoints.Add(end);
+        }
+
+        foreach (var (start, end) in windows)
+        {
+            cutPoints.Add(start);
+            cutPoints.Add(end);
+        }
+
+        cutPoints.Sort();
+        var uniqueCuts = new List<DateTimeOffset>(cutPoints.Count);
+        foreach (var t in cutPoints)
+        {
+            if (uniqueCuts.Count == 0 || uniqueCuts[^1] != t)
+            {
+                uniqueCuts.Add(t);
+            }
+        }
+
+        if (uniqueCuts.Count < 2)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        var baseSegments = new List<(DateTimeOffset Start, DateTimeOffset End, string Kind)>();
+
+        var toolIdx = 0;
+        var windowIdx = 0;
+
+        for (var idx = 0; idx < uniqueCuts.Count - 1; idx++)
+        {
+            var segStart = uniqueCuts[idx];
+            var segEnd = uniqueCuts[idx + 1];
+            if (segEnd <= segStart)
+            {
+                continue;
+            }
+
+            var durationMs = (long)(segEnd - segStart).TotalMilliseconds;
+            if (durationMs <= 0)
+            {
+                continue;
+            }
+
+            while (toolIdx < tools.Count && tools[toolIdx].End <= segStart)
+            {
+                toolIdx++;
+            }
+
+            var inTool = toolIdx < tools.Count && Overlaps(segStart, segEnd, tools[toolIdx].Start, tools[toolIdx].End);
+
+            while (windowIdx < windows.Count && windows[windowIdx].End <= segStart)
+            {
+                windowIdx++;
+            }
+
+            var inWindow = windowIdx < windows.Count && Overlaps(segStart, segEnd, windows[windowIdx].Start, windows[windowIdx].End);
+
+            var kind = inTool ? kindTool : inWindow ? "model" : kindWaiting;
+            baseSegments.Add((segStart, segEnd, kind));
+        }
+
+        if (baseSegments.Count == 0)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        var sortedTokens = tokenSnapshots
+            .Where(x => x.Timestamp >= startAt && x.Timestamp <= lastEventAt)
+            .OrderBy(x => x.Timestamp)
+            .ToArray();
+
+        var tokenIdx = 0;
+
+        var spans = new List<SessionTraceSpanDto>();
+
+        void AddSpan(string kind, long durationMs, long tokenCount, int eventCount)
+        {
+            if (durationMs <= 0)
+            {
+                return;
+            }
+
+            if (spans.Count > 0 && string.Equals(spans[^1].Kind, kind, StringComparison.Ordinal))
+            {
+                var last = spans[^1];
+                spans[^1] = new SessionTraceSpanDto(
+                    Kind: last.Kind,
+                    DurationMs: last.DurationMs + durationMs,
+                    TokenCount: last.TokenCount + tokenCount,
+                    EventCount: last.EventCount + eventCount);
+                return;
+            }
+
+            spans.Add(new SessionTraceSpanDto(kind, durationMs, tokenCount, eventCount));
+        }
+
+        int CountToolCalls(DateTimeOffset start, DateTimeOffset end)
+        {
+            var count = 0;
+            foreach (var interval in toolsRaw)
+            {
+                if (Overlaps(start, end, interval.Start, interval.End))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        var segIdx = 0;
+        while (segIdx < baseSegments.Count)
+        {
+            var seg = baseSegments[segIdx];
+            var segStart = seg.Start;
+            var segEnd = seg.End;
+            var segDurationMs = (long)(segEnd - segStart).TotalMilliseconds;
+
+            if (!string.Equals(seg.Kind, "model", StringComparison.Ordinal))
+            {
+                if (string.Equals(seg.Kind, kindTool, StringComparison.Ordinal))
+                {
+                    AddSpan(kindTool, segDurationMs, 0, CountToolCalls(segStart, segEnd));
+                }
+                else
+                {
+                    AddSpan(kindWaiting, segDurationMs, 0, 0);
+                }
+
+                segIdx++;
+                continue;
+            }
+
+            var blockStart = segStart;
+            var blockEnd = segEnd;
+            segIdx++;
+
+            while (segIdx < baseSegments.Count && string.Equals(baseSegments[segIdx].Kind, "model", StringComparison.Ordinal))
+            {
+                blockEnd = baseSegments[segIdx].End;
+                segIdx++;
+            }
+
+            var blockDurationMs = (long)(blockEnd - blockStart).TotalMilliseconds;
+            if (blockDurationMs <= 0)
+            {
+                continue;
+            }
+
+            while (tokenIdx < sortedTokens.Length && sortedTokens[tokenIdx].Timestamp < blockStart)
+            {
+                tokenIdx++;
+            }
+
+            var cutoff = blockEnd + TimeSpan.FromSeconds(1);
+            var requestCount = 0;
+            var prefillTokens = 0L;
+            var genTokens = 0L;
+
+            while (tokenIdx < sortedTokens.Length && sortedTokens[tokenIdx].Timestamp <= cutoff)
+            {
+                var usage = sortedTokens[tokenIdx].Usage;
+                prefillTokens += usage.PrefillTokens;
+                genTokens += usage.GenTokens;
+                requestCount++;
+                tokenIdx++;
+            }
+
+            var networkDurationMs = requestCount > 0
+                ? Math.Min(blockDurationMs, requestCount * networkOverheadMsPerRequest)
+                : 0;
+
+            var remainingDurationMs = blockDurationMs - networkDurationMs;
+            if (remainingDurationMs < 0)
+            {
+                remainingDurationMs = 0;
+            }
+
+            var prefillDurationMs = 0L;
+            var genDurationMs = remainingDurationMs;
+
+            if (remainingDurationMs > 0 && (prefillTokens > 0 || genTokens > 0))
+            {
+                var prefillCost = prefillTokensPerSecond <= 0
+                    ? 0
+                    : prefillTokens / prefillTokensPerSecond;
+
+                var genCost = genTokensPerSecond <= 0
+                    ? 0
+                    : genTokens / genTokensPerSecond;
+
+                var totalCost = prefillCost + genCost;
+                var prefillShare = totalCost <= 0 ? 0 : prefillCost / totalCost;
+                prefillDurationMs = (long)Math.Round(remainingDurationMs * prefillShare);
+
+                if (prefillDurationMs < 0)
+                {
+                    prefillDurationMs = 0;
+                }
+
+                if (prefillDurationMs > remainingDurationMs)
+                {
+                    prefillDurationMs = remainingDurationMs;
+                }
+
+                genDurationMs = remainingDurationMs - prefillDurationMs;
+
+                if (prefillTokens > 0 && prefillDurationMs == 0 && remainingDurationMs > 0)
+                {
+                    prefillDurationMs = 1;
+                    genDurationMs = Math.Max(0, remainingDurationMs - 1);
+                }
+
+                if (genTokens > 0 && genDurationMs == 0 && remainingDurationMs > 0)
+                {
+                    genDurationMs = 1;
+                    prefillDurationMs = Math.Max(0, remainingDurationMs - 1);
+                }
+            }
+
+            if (networkDurationMs > 0)
+            {
+                AddSpan(kindNetwork, networkDurationMs, 0, requestCount);
+            }
+
+            if (prefillDurationMs > 0)
+            {
+                AddSpan(kindPrefill, prefillDurationMs, prefillTokens, requestCount);
+            }
+
+            if (genDurationMs > 0)
+            {
+                AddSpan(kindGen, genDurationMs, genTokens, requestCount);
+            }
+        }
+
+        return spans;
+    }
+
+    private static IReadOnlyList<SessionTraceSpanDto> BuildTrace(
+        DateTimeOffset startAt,
+        DateTimeOffset lastEventAt,
+        IReadOnlyList<DateTimeOffset> userMessageTimes,
+        IReadOnlyList<DateTimeOffset> assistantMessageTimes,
+        IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> toolIntervals,
+        IReadOnlyList<(DateTimeOffset Timestamp, CodexTokenUsageSnapshot Delta)> tokenDeltas)
+    {
+        var duration = lastEventAt - startAt;
+        if (duration <= TimeSpan.Zero)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        const string kindTool = "tool";
+        const string kindWaiting = "waiting";
+        const string kindThink = "think";
+        const string kindGen = "gen";
+
+        static bool Overlaps(DateTimeOffset startA, DateTimeOffset endA, DateTimeOffset startB, DateTimeOffset endB)
+            => startA < endB && endA > startB;
+
+        static List<(DateTimeOffset Start, DateTimeOffset End)> NormalizeIntervals(
+            IEnumerable<(DateTimeOffset Start, DateTimeOffset End)> intervals,
+            DateTimeOffset min,
+            DateTimeOffset max)
+        {
+            var list = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+            foreach (var (start, end) in intervals)
+            {
+                var clampedStart = start < min ? min : start;
+                var clampedEnd = end > max ? max : end;
+                if (clampedEnd <= clampedStart)
+                {
+                    continue;
+                }
+
+                list.Add((clampedStart, clampedEnd));
+            }
+
+            list.Sort((a, b) => a.Start.CompareTo(b.Start));
+            return list;
+        }
+
+        static List<(DateTimeOffset Start, DateTimeOffset End)> MergeIntervals(
+            List<(DateTimeOffset Start, DateTimeOffset End)> intervals)
+        {
+            if (intervals.Count <= 1)
+            {
+                return intervals;
+            }
+
+            var merged = new List<(DateTimeOffset Start, DateTimeOffset End)>(intervals.Count);
+            var currentStart = intervals[0].Start;
+            var currentEnd = intervals[0].End;
+
+            for (var idx = 1; idx < intervals.Count; idx++)
+            {
+                var next = intervals[idx];
+                if (next.Start <= currentEnd)
+                {
+                    if (next.End > currentEnd)
+                    {
+                        currentEnd = next.End;
+                    }
+
+                    continue;
+                }
+
+                merged.Add((currentStart, currentEnd));
+                currentStart = next.Start;
+                currentEnd = next.End;
+            }
+
+            merged.Add((currentStart, currentEnd));
+            return merged;
+        }
+
+        static DateTimeOffset[] DistinctSortedTimes(
+            IEnumerable<DateTimeOffset> times,
+            DateTimeOffset min,
+            DateTimeOffset max)
+        {
+            var sorted = times
+                .Where(t => t >= min && t <= max)
+                .OrderBy(t => t)
+                .ToArray();
+
+            if (sorted.Length <= 1)
+            {
+                return sorted;
+            }
+
+            var unique = new List<DateTimeOffset>(sorted.Length);
+            foreach (var t in sorted)
+            {
+                if (unique.Count == 0 || unique[^1] != t)
+                {
+                    unique.Add(t);
+                }
+            }
+
+            return unique.ToArray();
+        }
+
+        static List<(DateTimeOffset Start, DateTimeOffset End)> BuildWaitingIntervals(
+            DateTimeOffset[] users,
+            DateTimeOffset[] assistants,
+            DateTimeOffset endAt)
+        {
+            var intervals = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+
+            var userIdx = 0;
+            var assistantIdx = 0;
+            DateTimeOffset? waitingStart = null;
+
+            while (userIdx < users.Length || assistantIdx < assistants.Length)
+            {
+                var nextUser = userIdx < users.Length ? users[userIdx] : (DateTimeOffset?)null;
+                var nextAssistant = assistantIdx < assistants.Length ? assistants[assistantIdx] : (DateTimeOffset?)null;
+
+                if (nextAssistant.HasValue && (!nextUser.HasValue || nextAssistant.Value <= nextUser.Value))
+                {
+                    waitingStart = nextAssistant.Value;
+                    assistantIdx++;
+                    continue;
+                }
+
+                if (!nextUser.HasValue)
+                {
+                    break;
+                }
+
+                if (waitingStart.HasValue && nextUser.Value > waitingStart.Value)
+                {
+                    intervals.Add((waitingStart.Value, nextUser.Value));
+                }
+
+                waitingStart = null;
+                userIdx++;
+            }
+
+            if (waitingStart.HasValue && endAt > waitingStart.Value)
+            {
+                intervals.Add((waitingStart.Value, endAt));
+            }
+
+            return intervals;
+        }
+
+        var toolsRaw = NormalizeIntervals(toolIntervals, startAt, lastEventAt);
+        var tools = MergeIntervals(new List<(DateTimeOffset Start, DateTimeOffset End)>(toolsRaw));
+
+        var users = DistinctSortedTimes(userMessageTimes, startAt, lastEventAt);
+        var assistants = DistinctSortedTimes(assistantMessageTimes, startAt, lastEventAt);
+
+        var waitingRaw = NormalizeIntervals(BuildWaitingIntervals(users, assistants, lastEventAt), startAt, lastEventAt);
+        var waiting = MergeIntervals(new List<(DateTimeOffset Start, DateTimeOffset End)>(waitingRaw));
+
+        var assistantSet = new HashSet<DateTimeOffset>(assistants);
+        var userSet = new HashSet<DateTimeOffset>(users);
+        var toolStartSet = new HashSet<DateTimeOffset>(toolsRaw.Select(x => x.Start));
+
+        var cutPoints = new List<DateTimeOffset>(
+            2
+            + toolsRaw.Count * 2
+            + waitingRaw.Count * 2
+            + users.Length
+            + assistants.Length);
+
+        cutPoints.Add(startAt);
+        cutPoints.Add(lastEventAt);
+
+        foreach (var (start, end) in toolsRaw)
+        {
+            cutPoints.Add(start);
+            cutPoints.Add(end);
+        }
+
+        foreach (var (start, end) in waitingRaw)
+        {
+            cutPoints.Add(start);
+            cutPoints.Add(end);
+        }
+
+        foreach (var t in users)
+        {
+            cutPoints.Add(t);
+        }
+
+        foreach (var t in assistants)
+        {
+            cutPoints.Add(t);
+        }
+
+        cutPoints.Sort();
+        var uniqueCuts = new List<DateTimeOffset>(cutPoints.Count);
+        foreach (var t in cutPoints)
+        {
+            if (uniqueCuts.Count == 0 || uniqueCuts[^1] != t)
+            {
+                uniqueCuts.Add(t);
+            }
+        }
+
+        if (uniqueCuts.Count < 2)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        var baseSegments = new List<(DateTimeOffset Start, DateTimeOffset End, string Kind)>();
+        var toolIdx = 0;
+        var waitingIdx = 0;
+
+        for (var idx = 0; idx < uniqueCuts.Count - 1; idx++)
+        {
+            var segStart = uniqueCuts[idx];
+            var segEnd = uniqueCuts[idx + 1];
+            if (segEnd <= segStart)
+            {
+                continue;
+            }
+
+            while (toolIdx < tools.Count && tools[toolIdx].End <= segStart)
+            {
+                toolIdx++;
+            }
+
+            var inTool = toolIdx < tools.Count && Overlaps(segStart, segEnd, tools[toolIdx].Start, tools[toolIdx].End);
+
+            while (waitingIdx < waiting.Count && waiting[waitingIdx].End <= segStart)
+            {
+                waitingIdx++;
+            }
+
+            var inWaiting = waitingIdx < waiting.Count && Overlaps(segStart, segEnd, waiting[waitingIdx].Start, waiting[waitingIdx].End);
+
+            string kind;
+            if (inTool)
+            {
+                kind = kindTool;
+            }
+            else if (inWaiting || userSet.Contains(segEnd))
+            {
+                kind = kindWaiting;
+            }
+            else if (assistantSet.Contains(segEnd))
+            {
+                kind = kindGen;
+            }
+            else if (toolStartSet.Contains(segEnd))
+            {
+                kind = kindThink;
+            }
+            else
+            {
+                kind = kindThink;
+            }
+
+            baseSegments.Add((segStart, segEnd, kind));
+        }
+
+        if (baseSegments.Count == 0)
+        {
+            return Array.Empty<SessionTraceSpanDto>();
+        }
+
+        var mergedSegments = new List<(DateTimeOffset Start, DateTimeOffset End, string Kind)>(baseSegments.Count);
+        foreach (var seg in baseSegments)
+        {
+            if (mergedSegments.Count > 0 && string.Equals(mergedSegments[^1].Kind, seg.Kind, StringComparison.Ordinal))
+            {
+                mergedSegments[^1] = (mergedSegments[^1].Start, seg.End, seg.Kind);
+                continue;
+            }
+
+            mergedSegments.Add(seg);
+        }
+
+        int CountToolCalls(DateTimeOffset start, DateTimeOffset end)
+        {
+            var count = 0;
+            foreach (var interval in toolsRaw)
+            {
+                if (Overlaps(start, end, interval.Start, interval.End))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        var tokenCounts = new long[mergedSegments.Count];
+        var eventCounts = new int[mergedSegments.Count];
+
+        for (var i = 0; i < mergedSegments.Count; i++)
+        {
+            var seg = mergedSegments[i];
+            if (string.Equals(seg.Kind, kindTool, StringComparison.Ordinal))
+            {
+                eventCounts[i] = CountToolCalls(seg.Start, seg.End);
+            }
+        }
+
+        var sortedTokens = tokenDeltas
+            .Where(x => x.Timestamp >= startAt && x.Timestamp <= lastEventAt)
+            .OrderBy(x => x.Timestamp)
+            .ToArray();
+
+        var segPtr = 0;
+        int? lastModelSegIdx = null;
+
+        for (var i = 0; i < sortedTokens.Length; i++)
+        {
+            var tokenAt = sortedTokens[i].Timestamp;
+            var delta = sortedTokens[i].Delta;
+            if (delta.TotalTokens <= 0)
+            {
+                continue;
+            }
+
+            while (segPtr < mergedSegments.Count && mergedSegments[segPtr].End <= tokenAt)
+            {
+                var kind = mergedSegments[segPtr].Kind;
+                if (string.Equals(kind, kindThink, StringComparison.Ordinal)
+                    || string.Equals(kind, kindGen, StringComparison.Ordinal))
+                {
+                    lastModelSegIdx = segPtr;
+                }
+
+                segPtr++;
+            }
+
+            var targetIdx = -1;
+
+            if (segPtr < mergedSegments.Count)
+            {
+                var cur = mergedSegments[segPtr];
+                if (cur.Start <= tokenAt && tokenAt < cur.End
+                    && (string.Equals(cur.Kind, kindThink, StringComparison.Ordinal)
+                        || string.Equals(cur.Kind, kindGen, StringComparison.Ordinal)))
+                {
+                    targetIdx = segPtr;
+                }
+            }
+
+            if (targetIdx < 0 && lastModelSegIdx.HasValue)
+            {
+                targetIdx = lastModelSegIdx.Value;
+            }
+
+            if (targetIdx >= 0)
+            {
+                tokenCounts[targetIdx] += delta.TotalTokens;
+                eventCounts[targetIdx] += 1;
+            }
+        }
+
+        var spans = new List<SessionTraceSpanDto>(mergedSegments.Count);
+        for (var i = 0; i < mergedSegments.Count; i++)
+        {
+            var seg = mergedSegments[i];
+            var segDurationMs = (long)(seg.End - seg.Start).TotalMilliseconds;
+            if (segDurationMs <= 0)
+            {
+                continue;
+            }
+
+            spans.Add(new SessionTraceSpanDto(
+                Kind: seg.Kind,
+                DurationMs: segDurationMs,
+                TokenCount: tokenCounts[i],
+                EventCount: eventCounts[i]));
+        }
+
+        return spans;
+    }
+
     private static bool TryReadTimestamp(JsonElement root, out DateTimeOffset timestamp)
     {
         timestamp = default;
@@ -1243,8 +2821,8 @@ public static class ApiEndpoints
 
             return value switch
             {
-                "message" or "user_message" => CodexSessionEventKind.Message,
-                "function_call" or "function_call_output" => CodexSessionEventKind.FunctionCall,
+                "message" or "user_message" or "agent_message" => CodexSessionEventKind.Message,
+                "function_call" or "function_call_output" or "custom_tool_call" or "custom_tool_call_output" => CodexSessionEventKind.FunctionCall,
                 "agent_reasoning" or "reasoning" => CodexSessionEventKind.AgentReasoning,
                 "token_count" => CodexSessionEventKind.TokenCount,
                 _ => CodexSessionEventKind.Other,
@@ -1252,6 +2830,122 @@ public static class ApiEndpoints
         }
 
         return CodexSessionEventKind.Other;
+    }
+
+    private static bool TryReadCodexTotalTokenUsage(JsonElement payload, out CodexTokenUsageSnapshot snapshot)
+    {
+        snapshot = new CodexTokenUsageSnapshot(0, 0, 0, 0);
+
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!payload.TryGetProperty("type", out var payloadType) || payloadType.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        if (!string.Equals(payloadType.GetString(), "token_count", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!payload.TryGetProperty("info", out var info) || info.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!info.TryGetProperty("total_token_usage", out var totalUsage) || totalUsage.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var inputTokens = 0L;
+        var cachedInputTokens = 0L;
+        var outputTokens = 0L;
+        var reasoningOutputTokens = 0L;
+
+        if (totalUsage.TryGetProperty("input_tokens", out var inputProp) && inputProp.TryGetInt64(out var input))
+        {
+            inputTokens = input;
+        }
+
+        if (totalUsage.TryGetProperty("cached_input_tokens", out var cachedProp) && cachedProp.TryGetInt64(out var cached))
+        {
+            cachedInputTokens = cached;
+        }
+
+        if (totalUsage.TryGetProperty("output_tokens", out var outputProp) && outputProp.TryGetInt64(out var output))
+        {
+            outputTokens = output;
+        }
+
+        if (totalUsage.TryGetProperty("reasoning_output_tokens", out var reasoningProp) && reasoningProp.TryGetInt64(out var reasoning))
+        {
+            reasoningOutputTokens = reasoning;
+        }
+
+        snapshot = new CodexTokenUsageSnapshot(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+        return true;
+    }
+
+    private static bool TryReadCodexTokenUsageSnapshot(JsonElement payload, out CodexTokenUsageSnapshot snapshot)
+    {
+        snapshot = new CodexTokenUsageSnapshot(0, 0, 0, 0);
+
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!payload.TryGetProperty("type", out var payloadType) || payloadType.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        if (!string.Equals(payloadType.GetString(), "token_count", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!payload.TryGetProperty("info", out var info) || info.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!info.TryGetProperty("last_token_usage", out var lastUsage) || lastUsage.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var inputTokens = 0L;
+        var cachedInputTokens = 0L;
+        var outputTokens = 0L;
+        var reasoningOutputTokens = 0L;
+
+        if (lastUsage.TryGetProperty("input_tokens", out var inputProp) && inputProp.TryGetInt64(out var input))
+        {
+            inputTokens = input;
+        }
+
+        if (lastUsage.TryGetProperty("cached_input_tokens", out var cachedProp) && cachedProp.TryGetInt64(out var cached))
+        {
+            cachedInputTokens = cached;
+        }
+
+        if (lastUsage.TryGetProperty("output_tokens", out var outputProp) && outputProp.TryGetInt64(out var output))
+        {
+            outputTokens = output;
+        }
+
+        if (lastUsage.TryGetProperty("reasoning_output_tokens", out var reasoningProp) && reasoningProp.TryGetInt64(out var reasoning))
+        {
+            reasoningOutputTokens = reasoning;
+        }
+
+        snapshot = new CodexTokenUsageSnapshot(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+        return true;
     }
 
     private static bool TryAccumulateCodexTokenUsage(
@@ -1354,12 +3048,37 @@ public static class ApiEndpoints
     private static string BuildProjectNameFromCwd(string cwd)
     {
         var trimmed = cwd.Trim();
-        if (trimmed.Length <= ProjectNameMaxLength)
+        if (trimmed.Length == 0)
         {
             return trimmed;
         }
 
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(trimmed)));
+        var withoutTrailingSeparators = trimmed.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
+        if (withoutTrailingSeparators.Length == 0)
+        {
+            withoutTrailingSeparators = trimmed;
+        }
+
+        var folderName = Path.GetFileName(withoutTrailingSeparators);
+        if (string.IsNullOrWhiteSpace(folderName))
+        {
+            folderName = withoutTrailingSeparators;
+        }
+
+        folderName = folderName.Trim();
+        if (folderName.Length == 0)
+        {
+            folderName = "root";
+        }
+
+        if (folderName.Length <= ProjectNameMaxLength)
+        {
+            return folderName;
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(folderName)));
         var suffix = "-" + hash[..8];
         var prefixLength = ProjectNameMaxLength - suffix.Length;
         if (prefixLength <= 0)
@@ -1367,7 +3086,61 @@ public static class ApiEndpoints
             return hash[..ProjectNameMaxLength];
         }
 
-        return trimmed[..prefixLength] + suffix;
+        return folderName[..prefixLength] + suffix;
+    }
+
+    private static string EnsureUniqueProjectName(
+        string baseName,
+        string workspacePath,
+        HashSet<string> existingNameSet)
+    {
+        if (!existingNameSet.Contains(baseName))
+        {
+            return baseName;
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspacePath)));
+        foreach (var size in new[] { 8, 12, 16 })
+        {
+            var suffix = "-" + hash[..size];
+            var prefixLength = ProjectNameMaxLength - suffix.Length;
+            if (prefixLength <= 0)
+            {
+                var candidate = hash[..ProjectNameMaxLength];
+                if (!existingNameSet.Contains(candidate))
+                {
+                    return candidate;
+                }
+
+                continue;
+            }
+
+            var prefix = baseName.Length > prefixLength
+                ? baseName[..prefixLength]
+                : baseName;
+            var candidateName = prefix + suffix;
+            if (!existingNameSet.Contains(candidateName))
+            {
+                return candidateName;
+            }
+        }
+
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            var random = Guid.NewGuid().ToString("N")[..8];
+            var suffix = "-" + random;
+            var prefixLength = ProjectNameMaxLength - suffix.Length;
+            var prefix = baseName.Length > prefixLength
+                ? baseName[..prefixLength]
+                : baseName;
+            var candidateName = prefix + suffix;
+            if (!existingNameSet.Contains(candidateName))
+            {
+                return candidateName;
+            }
+        }
+
+        return baseName;
     }
 
     private static string GetCodexConfigPath()

@@ -54,6 +54,7 @@ type FolderTriggerProps = FileLabelPrimitiveProps & {
   triggerClassName?: string;
   onClick?: React.MouseEventHandler<HTMLButtonElement>;
   onDoubleClick?: React.MouseEventHandler<HTMLButtonElement>;
+  onContextMenu?: React.MouseEventHandler<HTMLButtonElement>;
   disabled?: boolean;
 };
 
@@ -64,6 +65,7 @@ function FolderTrigger({
   triggerClassName,
   onClick,
   onDoubleClick,
+  onContextMenu,
   disabled,
   ...props
 }: FolderTriggerProps) {
@@ -73,6 +75,7 @@ function FolderTrigger({
         className={cn('w-full text-start', triggerClassName)}
         onClick={onClick}
         onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
         disabled={disabled}
       >
         <FolderHighlightPrimitive>
@@ -134,10 +137,11 @@ function FileItem({
   className,
   children,
   gitStatus,
+  onContextMenu,
   ...props
 }: FileItemProps) {
   return (
-    <FileHighlightPrimitive>
+    <FileHighlightPrimitive onContextMenu={onContextMenu}>
       <FilePrimitive
         className={cn(
           'flex items-center justify-between gap-2 p-2 pointer-events-none',
