@@ -1,16 +1,39 @@
+import type { ReactNode } from 'react'
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { ProvidersPage } from '@/pages/ProvidersPage'
 import { ProjectWorkspacePage } from '@/pages/ProjectWorkspacePage'
 import { ToolPage } from '@/pages/ToolPage'
 import { ThemeTogglerButton } from '@animate-ui/components-buttons-theme-toggler'
+import { Settings } from 'lucide-react'
 
-function NavLink({
+function MaskIcon({ src, className }: { src: string; className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn('size-5 bg-current', className)}
+      style={{
+        maskImage: `url(${src})`,
+        maskRepeat: 'no-repeat',
+        maskPosition: 'center',
+        maskSize: 'contain',
+        WebkitMaskImage: `url(${src})`,
+        WebkitMaskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        WebkitMaskSize: 'contain',
+      }}
+    />
+  )
+}
+
+function NavIconLink({
   to,
   label,
+  icon,
 }: {
   to: string
   label: string
+  icon: ReactNode
 }) {
   const location = useLocation()
   const active = location.pathname === to
@@ -18,14 +41,17 @@ function NavLink({
   return (
     <Link
       to={to}
+      aria-label={label}
+      title={label}
       className={cn(
-        'w-full rounded-md px-3 py-2 text-sm font-medium transition-colors',
+        'flex size-10 items-center justify-center rounded-lg transition-colors',
         active
-          ? 'bg-primary text-primary-foreground'
-          : 'hover:bg-accent hover:text-accent-foreground',
+          ? 'bg-accent text-accent-foreground shadow-sm'
+          : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
       )}
     >
-      {label}
+      {icon}
+      <span className="sr-only">{label}</span>
     </Link>
   )
 }
@@ -33,30 +59,37 @@ function NavLink({
 export default function App() {
   return (
     <div className="h-screen overflow-hidden bg-background text-foreground">
-      <div className="mx-auto flex h-full w-full max-w-none gap-6 px-4 py-6">
-        <aside className="w-56 shrink-0">
-          <div className="rounded-lg border bg-card p-3">
-            <div className="mb-3 flex items-center justify-between px-2">
-              <div className="text-sm font-semibold">OneCode</div>
-              <ThemeTogglerButton
-                aria-label="切换主题"
-                title="切换主题"
-                variant="ghost"
-                size="sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <NavLink to="/codex" label="Codex" />
-              <NavLink to="/claude" label="Claude Code" />
-              <NavLink to="/providers" label="提供商管理" />
-            </div>
-          </div>
-          <div className="mt-3 text-xs text-muted-foreground">
-            本机工具，无需登录
+      <div className="flex h-full w-full">
+        <aside className="flex w-16 shrink-0 flex-col items-center border-r bg-card px-2 py-4">
+          <nav className="flex flex-col items-center gap-2">
+            <NavIconLink
+              to="/codex"
+              label="Codex"
+              icon={<MaskIcon src="/code.svg" />}
+            />
+            <NavIconLink
+              to="/claude"
+              label="Claude Code"
+              icon={<MaskIcon src="/claude-code.svg" />}
+            />
+            <NavIconLink
+              to="/providers"
+              label="提供商管理"
+              icon={<Settings className="size-5" aria-hidden="true" />}
+            />
+          </nav>
+
+          <div className="mt-auto">
+            <ThemeTogglerButton
+              aria-label="切换主题"
+              title="切换主题"
+              variant="ghost"
+              size="lg"
+            />
           </div>
         </aside>
 
-        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6">
           <Routes>
             <Route path="/" element={<Navigate to="/codex" replace />} />
             <Route path="/codex" element={<ToolPage tool="codex" title="Codex" />} />

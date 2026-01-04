@@ -38,6 +38,31 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
+import { Spinner } from '@/components/ui/spinner'
+import {
+  Braces,
+  ChevronDown,
+  Database,
+  File,
+  FileArchive,
+  FileCode,
+  FileCog,
+  FileImage,
+  FileMusic,
+  FileSpreadsheet,
+  FileTerminal,
+  FileText,
+  FileVideoCamera,
+  Folder,
+  FolderArchive,
+  FolderCode,
+  FolderCog,
+  FolderGit2,
+  FolderOpen,
+  Package,
+  PanelRightClose,
+  PanelRightOpen,
+} from 'lucide-react'
 
 type FsEntryKind = 'file' | 'directory'
 
@@ -45,6 +70,204 @@ type FsEntryTarget = {
   kind: FsEntryKind
   name: string
   fullPath: string
+}
+
+type FileIconSpec = {
+  Icon: typeof File
+  className: string
+}
+
+const defaultFileIcon: FileIconSpec = {
+  Icon: File,
+  className: 'text-muted-foreground',
+}
+
+function getFileIconSpec(fileName: string): FileIconSpec {
+  const lower = fileName.trim().toLowerCase()
+
+  if (
+    lower === 'package.json' ||
+    lower === 'package-lock.json' ||
+    lower === 'pnpm-lock.yaml' ||
+    lower === 'yarn.lock'
+  ) {
+    return { Icon: Package, className: 'text-amber-400' }
+  }
+
+  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) {
+    return { Icon: FileTerminal, className: 'text-sky-400' }
+  }
+
+  if (lower === 'makefile' || lower === 'cmakelists.txt') {
+    return { Icon: FileCog, className: 'text-muted-foreground' }
+  }
+
+  const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : ''
+  switch (ext) {
+    case 'ts':
+    case 'tsx':
+      return { Icon: FileCode, className: 'text-sky-400' }
+    case 'js':
+    case 'jsx':
+    case 'mjs':
+    case 'cjs':
+      return { Icon: FileCode, className: 'text-yellow-400' }
+    case 'json':
+    case 'jsonc':
+    case 'jsonl':
+      return { Icon: Braces, className: 'text-amber-400' }
+    case 'css':
+    case 'scss':
+    case 'sass':
+    case 'less':
+      return { Icon: FileCode, className: 'text-blue-400' }
+    case 'html':
+    case 'htm':
+      return { Icon: FileCode, className: 'text-orange-400' }
+    case 'md':
+    case 'mdx':
+    case 'txt':
+      return { Icon: FileText, className: 'text-muted-foreground' }
+    case 'cs':
+    case 'csproj':
+    case 'sln':
+    case 'slnx':
+      return { Icon: FileCode, className: 'text-purple-400' }
+    case 'yml':
+    case 'yaml':
+    case 'toml':
+    case 'ini':
+    case 'env':
+      return { Icon: FileCog, className: 'text-emerald-400' }
+    case 'sql':
+      return { Icon: Database, className: 'text-emerald-400' }
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+    case 'ps1':
+    case 'cmd':
+    case 'bat':
+      return { Icon: FileTerminal, className: 'text-muted-foreground' }
+    case 'png':
+    case 'jpg':
+    case 'jpeg':
+    case 'gif':
+    case 'svg':
+    case 'webp':
+    case 'ico':
+      return { Icon: FileImage, className: 'text-pink-400' }
+    case 'zip':
+    case 'rar':
+    case '7z':
+    case 'tar':
+    case 'gz':
+      return { Icon: FileArchive, className: 'text-muted-foreground' }
+    case 'mp3':
+    case 'wav':
+    case 'flac':
+    case 'ogg':
+      return { Icon: FileMusic, className: 'text-fuchsia-400' }
+    case 'mp4':
+    case 'mov':
+    case 'avi':
+    case 'mkv':
+      return { Icon: FileVideoCamera, className: 'text-indigo-400' }
+    case 'csv':
+    case 'xlsx':
+    case 'xls':
+      return { Icon: FileSpreadsheet, className: 'text-emerald-400' }
+    default:
+      return defaultFileIcon
+  }
+}
+
+function FileLabel({ name }: { name: string }) {
+  const { Icon, className } = getFileIconSpec(name)
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <Icon className={cn('size-4 shrink-0', className)} />
+      <span className="truncate">{name}</span>
+    </span>
+  )
+}
+
+const defaultDirectoryIcon: FileIconSpec = {
+  Icon: Folder,
+  className: 'text-muted-foreground',
+}
+
+function getDirectoryIconSpec(directoryName: string): FileIconSpec {
+  const lower = directoryName.trim().toLowerCase()
+
+  if (lower === '.git' || lower === '.github') {
+    return { Icon: FolderGit2, className: 'text-orange-400' }
+  }
+
+  if (lower === '.vscode' || lower === '.vs') {
+    return { Icon: FolderCog, className: 'text-sky-400' }
+  }
+
+  if (lower === 'node_modules') {
+    return { Icon: Package, className: 'text-amber-400' }
+  }
+
+  if (
+    lower === 'src' ||
+    lower === 'app' ||
+    lower === 'apps' ||
+    lower === 'api' ||
+    lower === 'controllers' ||
+    lower === 'services' ||
+    lower === 'contracts' ||
+    lower === 'data' ||
+    lower === 'components' ||
+    lower === 'pages' ||
+    lower === 'hooks' ||
+    lower === 'lib' ||
+    lower === 'utils'
+  ) {
+    return { Icon: FolderCode, className: 'text-sky-400' }
+  }
+
+  if (
+    lower === 'config' ||
+    lower === 'configs' ||
+    lower === 'settings' ||
+    lower === 'scripts' ||
+    lower === 'tools'
+  ) {
+    return { Icon: FolderCog, className: 'text-emerald-400' }
+  }
+
+  if (
+    lower === 'dist' ||
+    lower === 'build' ||
+    lower === 'out' ||
+    lower === 'bin' ||
+    lower === 'obj'
+  ) {
+    return { Icon: FolderArchive, className: 'text-muted-foreground' }
+  }
+
+  if (lower === 'public' || lower === 'static' || lower === 'assets') {
+    return { Icon: FolderOpen, className: 'text-pink-400' }
+  }
+
+  if (lower === 'docs' || lower === 'doc') {
+    return { Icon: FolderOpen, className: 'text-muted-foreground' }
+  }
+
+  return defaultDirectoryIcon
+}
+
+function DirectoryLabel({ name }: { name: string }) {
+  const { Icon, className } = getDirectoryIconSpec(name)
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <Icon className={cn('size-4 shrink-0', className)} />
+      <span className="truncate">{name}</span>
+    </span>
+  )
 }
 
 function normalizePathForComparison(path: string): string {
@@ -297,7 +520,15 @@ function readPartsText(parts: unknown[] | undefined): string {
   return chunks.join('')
 }
 
-function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
+function ProjectChatAndDetails({
+  project,
+  detailsOpen,
+  detailsPortalTarget,
+}: {
+  project: ProjectDto
+  detailsOpen: boolean
+  detailsPortalTarget: HTMLDivElement | null
+}) {
   const apiBase = useMemo(() => getApiBase(), [])
   const sessionIdRef = useRef<string>(randomId('ctx'))
 
@@ -311,7 +542,6 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
-  const [detailsOpen, setDetailsOpen] = useState(true)
   const [thinkingOpen, setThinkingOpen] = useState(false)
   const [reasoning, setReasoning] = useState('')
   const [toolOutput, setToolOutput] = useState('')
@@ -398,21 +628,34 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
       for await (const data of readSseText(res)) {
         if (!data) continue
 
-        let payload: any
+        let payload: unknown
         try {
           payload = JSON.parse(data)
         } catch {
           continue
         }
 
-        if (payload?.error) {
-          throw new Error(payload?.error?.message ?? 'A2A error')
+        if (!payload || typeof payload !== 'object') continue
+        const envelope = payload as { error?: unknown; result?: unknown }
+
+        if (envelope.error) {
+          const message =
+            typeof envelope.error === 'object' && envelope.error
+              ? (envelope.error as { message?: unknown }).message
+              : undefined
+          throw new Error(typeof message === 'string' ? message : 'A2A error')
         }
 
-        const result = payload?.result ?? null
+        const result = envelope.result ?? null
         if (!result) continue
 
-        const statusUpdate = (result.statusUpdate ?? null) as A2aStatusUpdate | null
+        if (typeof result !== 'object') continue
+        const resultObj = result as {
+          statusUpdate?: unknown
+          artifactUpdate?: unknown
+        }
+
+        const statusUpdate = (resultObj.statusUpdate ?? null) as A2aStatusUpdate | null
         if (statusUpdate?.status?.message?.messageId) {
           const messageId = statusUpdate.status.message.messageId
           const parts = statusUpdate.status.message.parts as unknown[] | undefined
@@ -434,7 +677,7 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
           }
         }
 
-        const artifactUpdate = (result.artifactUpdate ?? null) as A2aArtifactUpdate | null
+        const artifactUpdate = (resultObj.artifactUpdate ?? null) as A2aArtifactUpdate | null
         const artifact = artifactUpdate?.artifact
         const artifactName = artifact?.name ?? ''
 
@@ -460,20 +703,34 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
         }
 
         if (artifactName === 'token-usage') {
-          const parts = (artifact?.parts ?? []) as any[]
-          const firstData = parts?.find((p) => p && typeof p === 'object' && 'data' in p)?.data
-          if (firstData !== undefined) setTokenUsage(firstData)
+          const parts = (artifact?.parts ?? []) as unknown[]
+          for (const part of parts) {
+            if (!part || typeof part !== 'object') continue
+            const dataValue = (part as { data?: unknown }).data
+            if (dataValue !== undefined) {
+              setTokenUsage(dataValue)
+              break
+            }
+          }
           continue
         }
 
         if (artifactName === 'codex-events') {
-          const parts = (artifact?.parts ?? []) as any[]
+          const parts = (artifact?.parts ?? []) as unknown[]
           for (const part of parts) {
-            const d = part?.data
-            if (!d || typeof d !== 'object') continue
-            const receivedAtUtc = String((d as any).receivedAtUtc ?? '')
-            const method = typeof (d as any).method === 'string' ? (d as any).method : undefined
-            const raw = typeof (d as any).raw === 'string' ? (d as any).raw : ''
+            if (!part || typeof part !== 'object') continue
+            const dataValue = (part as { data?: unknown }).data
+            if (!dataValue || typeof dataValue !== 'object') continue
+
+            const dataObj = dataValue as {
+              receivedAtUtc?: unknown
+              method?: unknown
+              raw?: unknown
+            }
+
+            const receivedAtUtc = String(dataObj.receivedAtUtc ?? '')
+            const method = typeof dataObj.method === 'string' ? dataObj.method : undefined
+            const raw = typeof dataObj.raw === 'string' ? dataObj.raw : ''
             if (!raw) continue
             setRawEvents((prev) => [...prev, { receivedAtUtc, method, raw }])
           }
@@ -537,11 +794,6 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
             <div className="truncate text-sm font-medium">{project.name}</div>
             <div className="truncate text-xs text-muted-foreground">{project.workspacePath}</div>
           </div>
-          <div className="flex shrink-0 gap-2">
-            <Button type="button" variant="outline" onClick={() => setDetailsOpen((v) => !v)}>
-              {detailsOpen ? '隐藏详情' : '显示详情'}
-            </Button>
-          </div>
         </div>
 
         {chatError ? (
@@ -578,7 +830,15 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
                         : 'bg-accent text-accent-foreground',
                   )}
                 >
-                  {m.text || (m.role === 'agent' && sending ? '…' : '')}
+                  {m.text ? (
+                    m.text
+                  ) : m.role === 'agent' && sending ? (
+                    <span className="inline-flex items-center">
+                      <Spinner />
+                    </span>
+                  ) : (
+                    ''
+                  )}
                 </div>
               </div>
             ))}
@@ -622,97 +882,83 @@ function ProjectChatAndDetails({ project }: { project: ProjectDto }) {
         </div>
       </section>
 
-      {detailsOpen ? (
-        <aside className="w-[360px] shrink-0 overflow-hidden rounded-lg border bg-card flex flex-col">
-          <div className="flex items-center justify-between border-b px-3 py-2">
-            <div className="text-sm font-medium">详情</div>
-            <Button type="button" variant="outline" onClick={() => setDetailsOpen(false)}>
-              收起
-            </Button>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="border-b px-3 py-2">
-              <button
-                type="button"
-                className="flex w-full items-center justify-between text-sm"
-                onClick={() => setThinkingOpen((v) => !v)}
-              >
-                <span>思考</span>
-                <span className="text-xs text-muted-foreground">
-                  {thinkingOpen ? '收起' : sending ? '展开（生成中）' : '展开'}
-                </span>
-              </button>
-              {thinkingOpen ? (
-                <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-                  {reasoning || (sending ? '（等待思考内容…）' : '（无）')}
-                </pre>
-              ) : null}
-            </div>
-
-            <div className="border-b px-3 py-2">
-              <div className="text-sm">工具输出</div>
-              <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-                {toolOutput || '（无）'}
-              </pre>
-            </div>
-
-            <div className="border-b px-3 py-2">
-              <div className="text-sm">Diff</div>
-              <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
-                {diffText || '（无）'}
-              </pre>
-            </div>
-
-            <div className="border-b px-3 py-2">
-              <div className="text-sm">Token</div>
-              <pre className="mt-2 max-h-[160px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
-                {tokenUsage ? JSON.stringify(tokenUsage, null, 2) : '（无）'}
-              </pre>
-            </div>
-
-            <div className="px-3 py-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm">Raw Events</div>
-                <Button
+      {detailsOpen && detailsPortalTarget
+        ? createPortal(
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="border-b px-3 py-2">
+                <button
                   type="button"
-                  variant="outline"
-                  disabled={!rawEvents.length}
-                  onClick={() => setRawEvents([])}
+                  className="flex w-full items-center justify-between text-sm"
+                  onClick={() => setThinkingOpen((v) => !v)}
                 >
-                  清空
-                </Button>
+                  <span>思考</span>
+                  <span className="text-xs text-muted-foreground">
+                    {thinkingOpen ? '收起' : sending ? '展开（生成中）' : '展开'}
+                  </span>
+                </button>
+                {thinkingOpen ? (
+                  <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
+                    {reasoning || (sending ? '（等待思考内容…）' : '（无）')}
+                  </pre>
+                ) : null}
               </div>
-              <div className="mt-2 space-y-2">
-                {rawEvents.length ? null : (
-                  <div className="text-xs text-muted-foreground">（无）</div>
-                )}
-                {rawEvents.map((e, idx) => (
-                  <div key={`${e.receivedAtUtc}-${idx}`} className="rounded-md border bg-background p-2">
-                    <div className="truncate text-[11px] text-muted-foreground">
-                      {e.receivedAtUtc} {e.method ?? ''}
+
+              <div className="border-b px-3 py-2">
+                <div className="text-sm">工具输出</div>
+                <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
+                  {toolOutput || '（无）'}
+                </pre>
+              </div>
+
+              <div className="border-b px-3 py-2">
+                <div className="text-sm">Diff</div>
+                <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
+                  {diffText || '（无）'}
+                </pre>
+              </div>
+
+              <div className="border-b px-3 py-2">
+                <div className="text-sm">Token</div>
+                <pre className="mt-2 max-h-[160px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
+                  {tokenUsage ? JSON.stringify(tokenUsage, null, 2) : '（无）'}
+                </pre>
+              </div>
+
+              <div className="px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm">Raw Events</div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!rawEvents.length}
+                    onClick={() => setRawEvents([])}
+                  >
+                    清空
+                  </Button>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {rawEvents.length ? null : (
+                    <div className="text-xs text-muted-foreground">（无）</div>
+                  )}
+                  {rawEvents.map((e, idx) => (
+                    <div
+                      key={`${e.receivedAtUtc}-${idx}`}
+                      className="rounded-md border bg-background p-2"
+                    >
+                      <div className="truncate text-[11px] text-muted-foreground">
+                        {e.receivedAtUtc} {e.method ?? ''}
+                      </div>
+                      <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
+                        {e.raw}
+                      </pre>
                     </div>
-                    <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
-                      {e.raw}
-                    </pre>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          </div>
-        </aside>
-      ) : (
-        <aside className="w-10 shrink-0 overflow-hidden rounded-lg border bg-card flex items-center justify-center">
-          <button
-            type="button"
-            className="text-xs text-muted-foreground"
-            style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
-            onClick={() => setDetailsOpen(true)}
-          >
-            详情
-          </button>
-        </aside>
-      )}
+            </div>,
+            detailsPortalTarget,
+          )
+        : null}
     </>
   )
 }
@@ -724,6 +970,11 @@ export function ProjectWorkspacePage() {
   const [error, setError] = useState<string | null>(null)
   const [fsNotice, setFsNotice] = useState<string | null>(null)
   const fsNoticeTimerRef = useRef<number | null>(null)
+  const [sidePanelOpen, setSidePanelOpen] = useState(true)
+  const [filesPanelOpen, setFilesPanelOpen] = useState(true)
+  const [detailsPanelOpen, setDetailsPanelOpen] = useState(false)
+  const [detailsPortalTarget, setDetailsPortalTarget] =
+    useState<HTMLDivElement | null>(null)
 
   const showFsNotice = useCallback((message: string) => {
     setFsNotice(message)
@@ -1099,7 +1350,7 @@ export function ProjectWorkspacePage() {
             openFsMenu(e, { kind: 'file', name: file.name, fullPath: file.fullPath })
           }
         >
-          {file.name}
+          <FileLabel name={file.name} />
         </FileItem>
       )
     },
@@ -1123,7 +1374,7 @@ export function ProjectWorkspacePage() {
               openFsMenu(e, { kind: 'directory', name: dir.name, fullPath: dir.fullPath })
             }
           >
-            {dir.name}
+            <DirectoryLabel name={dir.name} />
           </FolderTrigger>
 
           <FolderContent>
@@ -1221,32 +1472,19 @@ export function ProjectWorkspacePage() {
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-hidden flex gap-4">
-        <aside className="w-1/4 min-w-[260px] shrink-0 overflow-hidden rounded-lg border bg-card flex flex-col">
-          {fsNotice ? (
-            <div className="p-2">
-              <Alert className="py-2">
-                <AlertDescription>{fsNotice}</AlertDescription>
-              </Alert>
-            </div>
-          ) : null}
-          <div
-            className="min-h-0 flex-1 overflow-hidden"
-            onContextMenu={(e) => {
-              if (!rootPath) return
-              openFsMenu(e, {
-                kind: 'directory',
-                name: getBaseName(rootPath),
-                fullPath: rootPath,
-              })
-            }}
-          >
-            {rootFilesView}
-          </div>
-        </aside>
-
+      <div
+        className={cn(
+          'min-h-0 flex-1 overflow-hidden flex',
+          sidePanelOpen ? 'gap-4' : '',
+        )}
+      >
         {project ? (
-          <ProjectChatAndDetails key={project.id} project={project} />
+          <ProjectChatAndDetails
+            key={project.id}
+            project={project}
+            detailsOpen={detailsPanelOpen}
+            detailsPortalTarget={detailsPortalTarget}
+          />
         ) : (
           <section className="min-w-0 flex-1 overflow-hidden rounded-lg border bg-card flex flex-col">
             <div className="min-h-0 flex-1 overflow-hidden p-4 text-sm text-muted-foreground">
@@ -1254,7 +1492,131 @@ export function ProjectWorkspacePage() {
             </div>
           </section>
         )}
+
+        <aside
+          aria-hidden={!sidePanelOpen}
+          className={cn(
+            'shrink-0 overflow-hidden rounded-lg bg-card flex flex-col',
+            'transition-all duration-200 ease-out',
+            sidePanelOpen
+              ? 'w-[360px] border opacity-100 translate-x-0'
+              : 'w-0 border-0 opacity-0 translate-x-2 pointer-events-none',
+          )}
+        >
+          <div className="flex items-center justify-between border-b px-3 py-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="收起侧边栏"
+              onClick={() => setSidePanelOpen(false)}
+            >
+              <PanelRightClose className="size-4" />
+            </Button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-hidden flex flex-col">
+            <button
+              type="button"
+              className={cn(
+                'flex w-full items-center gap-2 border-b px-3 py-2 text-xs font-medium text-muted-foreground',
+                'hover:bg-accent/40',
+              )}
+              onClick={() => setFilesPanelOpen((v) => !v)}
+            >
+              <ChevronDown
+                className={cn(
+                  'size-4 transition-transform',
+                  filesPanelOpen ? 'rotate-0' : '-rotate-90',
+                )}
+              />
+              <span>文件</span>
+            </button>
+
+            <div
+              aria-hidden={!filesPanelOpen}
+              className={cn(
+                'min-h-0 overflow-hidden flex flex-col basis-0 transition-all duration-200 ease-out',
+                filesPanelOpen ? 'grow opacity-100' : 'grow-0 opacity-0',
+                !filesPanelOpen && 'pointer-events-none',
+              )}
+            >
+              {fsNotice ? (
+                <div className="p-2">
+                  <Alert className="py-2">
+                    <AlertDescription>{fsNotice}</AlertDescription>
+                  </Alert>
+                </div>
+              ) : null}
+              <div
+                className="min-h-0 flex-1 overflow-hidden"
+                onContextMenu={(e) => {
+                  if (!rootPath) return
+                  openFsMenu(e, {
+                    kind: 'directory',
+                    name: getBaseName(rootPath),
+                    fullPath: rootPath,
+                  })
+                }}
+              >
+                {rootFilesView}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className={cn(
+                'flex w-full items-center gap-2 border-t px-3 py-2 text-xs font-medium text-muted-foreground',
+                'hover:bg-accent/40',
+              )}
+              onClick={() => setDetailsPanelOpen((v) => !v)}
+            >
+              <ChevronDown
+                className={cn(
+                  'size-4 transition-transform',
+                  detailsPanelOpen ? 'rotate-0' : '-rotate-90',
+                )}
+              />
+              <span>详情</span>
+            </button>
+
+            <div
+              aria-hidden={!detailsPanelOpen}
+              className={cn(
+                'min-h-0 overflow-hidden flex flex-col basis-0 transition-all duration-200 ease-out',
+                detailsPanelOpen
+                  ? filesPanelOpen
+                    ? 'grow-0 basis-[360px] opacity-100'
+                    : 'grow opacity-100'
+                  : 'grow-0 opacity-0',
+                !detailsPanelOpen && 'pointer-events-none',
+              )}
+            >
+              <div
+                ref={setDetailsPortalTarget}
+                className="min-h-0 flex-1 overflow-hidden"
+              />
+            </div>
+          </div>
+        </aside>
       </div>
+
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className={cn(
+          'fixed right-4 top-1/2 z-40 -translate-y-1/2 shadow-md transition-[opacity,transform] duration-200 ease-out',
+          sidePanelOpen
+            ? 'pointer-events-none translate-x-2 opacity-0 scale-95'
+            : 'translate-x-0 opacity-100 scale-100',
+        )}
+        title="打开资源管理器"
+        onClick={() => setSidePanelOpen(true)}
+      >
+        <PanelRightOpen className="size-4" />
+        <span className="sr-only">打开资源管理器</span>
+      </Button>
 
       <FsContextMenu
         open={Boolean(fsMenu)}
