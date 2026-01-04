@@ -180,3 +180,46 @@ export type CreateEntryRequest = {
 export type CreateEntryResponse = {
   fullPath: string
 }
+
+export type ReadFileResponse = {
+  path: string
+  content: string
+  truncated: boolean
+  isBinary: boolean
+  sizeBytes: number
+}
+
+export type GitStatusEntryDto = {
+  path: string
+  indexStatus: string
+  worktreeStatus: string
+  originalPath: string | null
+}
+
+export type GitStatusResponse = {
+  repoRoot: string
+  branch: string | null
+  entries: GitStatusEntryDto[]
+}
+
+export type GitLogResponse = {
+  repoRoot: string
+  branch: string | null
+  lines: string[]
+}
+
+export type GitDiffResponse = {
+  file: string
+  diff: string
+  truncated: boolean
+}
+
+export type GitCommitRequest = {
+  path: string
+  message: string
+}
+
+export type GitCommitResponse = {
+  hash: string
+  subject: string
+}

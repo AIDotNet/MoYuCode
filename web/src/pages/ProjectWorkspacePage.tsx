@@ -1,288 +1,60 @@
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
+  type PointerEvent,
 } from 'react'
-import { createPortal } from 'react-dom'
-import { useParams } from 'react-router-dom'
-import { api } from '@/api/client'
-import type {
-  DirectoryEntryDto,
-  FileEntryDto,
-  ListEntriesResponse,
-  ProjectDto,
-} from '@/api/types'
+import { useParams, useSearchParams } from 'react-router-dom'
+import { api, formatUtc } from '@/api/client'
+import type { GitStatusResponse, ProjectDto, ProjectSessionDto } from '@/api/types'
 import { cn } from '@/lib/utils'
-import {
-  FileItem,
-  Files,
-  FolderContent,
-  FolderItem,
-  FolderTrigger,
-  SubFiles,
-} from '@animate-ui/components-base-files'
-import { Modal } from '@/components/Modal'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { ShikiCode } from '@/components/ShikiCode'
+import { MonacoCode } from '@/components/MonacoCode'
+import { ProjectFileManager } from '@/components/project-workspace/ProjectFileManager'
+import { ProjectChat } from '@/components/project-workspace/ProjectChat'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Separator } from '@/components/ui/separator'
 import { Spinner } from '@/components/ui/spinner'
 import {
-  Braces,
-  ChevronDown,
-  Database,
-  File,
-  FileArchive,
-  FileCode,
-  FileCog,
-  FileImage,
-  FileMusic,
-  FileSpreadsheet,
-  FileTerminal,
   FileText,
-  FileVideoCamera,
   Folder,
-  FolderArchive,
-  FolderCode,
-  FolderCog,
-  FolderGit2,
-  FolderOpen,
-  Package,
   PanelRightClose,
   PanelRightOpen,
+  Terminal,
+  X,
 } from 'lucide-react'
 
-type FsEntryKind = 'file' | 'directory'
+type WorkspacePanelId = 'project-summary'
 
-type FsEntryTarget = {
-  kind: FsEntryKind
-  name: string
-  fullPath: string
+type WorkspaceView =
+  | { kind: 'empty' }
+  | { kind: 'file'; path: string }
+  | { kind: 'diff'; file: string }
+  | { kind: 'terminal' }
+  | { kind: 'output' }
+  | { kind: 'panel'; panelId: WorkspacePanelId }
+
+type WorkspaceTab =
+  | { kind: 'file'; path: string }
+  | { kind: 'diff'; file: string }
+  | { kind: 'panel'; panelId: WorkspacePanelId }
+
+type FilePreview = {
+  loading: boolean
+  error: string | null
+  content: string
+  truncated: boolean
+  isBinary: boolean
 }
 
-type FileIconSpec = {
-  Icon: typeof File
-  className: string
-}
-
-const defaultFileIcon: FileIconSpec = {
-  Icon: File,
-  className: 'text-muted-foreground',
-}
-
-function getFileIconSpec(fileName: string): FileIconSpec {
-  const lower = fileName.trim().toLowerCase()
-
-  if (
-    lower === 'package.json' ||
-    lower === 'package-lock.json' ||
-    lower === 'pnpm-lock.yaml' ||
-    lower === 'yarn.lock'
-  ) {
-    return { Icon: Package, className: 'text-amber-400' }
-  }
-
-  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) {
-    return { Icon: FileTerminal, className: 'text-sky-400' }
-  }
-
-  if (lower === 'makefile' || lower === 'cmakelists.txt') {
-    return { Icon: FileCog, className: 'text-muted-foreground' }
-  }
-
-  const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : ''
-  switch (ext) {
-    case 'ts':
-    case 'tsx':
-      return { Icon: FileCode, className: 'text-sky-400' }
-    case 'js':
-    case 'jsx':
-    case 'mjs':
-    case 'cjs':
-      return { Icon: FileCode, className: 'text-yellow-400' }
-    case 'json':
-    case 'jsonc':
-    case 'jsonl':
-      return { Icon: Braces, className: 'text-amber-400' }
-    case 'css':
-    case 'scss':
-    case 'sass':
-    case 'less':
-      return { Icon: FileCode, className: 'text-blue-400' }
-    case 'html':
-    case 'htm':
-      return { Icon: FileCode, className: 'text-orange-400' }
-    case 'md':
-    case 'mdx':
-    case 'txt':
-      return { Icon: FileText, className: 'text-muted-foreground' }
-    case 'cs':
-    case 'csproj':
-    case 'sln':
-    case 'slnx':
-      return { Icon: FileCode, className: 'text-purple-400' }
-    case 'yml':
-    case 'yaml':
-    case 'toml':
-    case 'ini':
-    case 'env':
-      return { Icon: FileCog, className: 'text-emerald-400' }
-    case 'sql':
-      return { Icon: Database, className: 'text-emerald-400' }
-    case 'sh':
-    case 'bash':
-    case 'zsh':
-    case 'ps1':
-    case 'cmd':
-    case 'bat':
-      return { Icon: FileTerminal, className: 'text-muted-foreground' }
-    case 'png':
-    case 'jpg':
-    case 'jpeg':
-    case 'gif':
-    case 'svg':
-    case 'webp':
-    case 'ico':
-      return { Icon: FileImage, className: 'text-pink-400' }
-    case 'zip':
-    case 'rar':
-    case '7z':
-    case 'tar':
-    case 'gz':
-      return { Icon: FileArchive, className: 'text-muted-foreground' }
-    case 'mp3':
-    case 'wav':
-    case 'flac':
-    case 'ogg':
-      return { Icon: FileMusic, className: 'text-fuchsia-400' }
-    case 'mp4':
-    case 'mov':
-    case 'avi':
-    case 'mkv':
-      return { Icon: FileVideoCamera, className: 'text-indigo-400' }
-    case 'csv':
-    case 'xlsx':
-    case 'xls':
-      return { Icon: FileSpreadsheet, className: 'text-emerald-400' }
-    default:
-      return defaultFileIcon
-  }
-}
-
-function FileLabel({ name }: { name: string }) {
-  const { Icon, className } = getFileIconSpec(name)
-  return (
-    <span className="flex min-w-0 items-center gap-2">
-      <Icon className={cn('size-4 shrink-0', className)} />
-      <span className="truncate">{name}</span>
-    </span>
-  )
-}
-
-const defaultDirectoryIcon: FileIconSpec = {
-  Icon: Folder,
-  className: 'text-muted-foreground',
-}
-
-function getDirectoryIconSpec(directoryName: string): FileIconSpec {
-  const lower = directoryName.trim().toLowerCase()
-
-  if (lower === '.git' || lower === '.github') {
-    return { Icon: FolderGit2, className: 'text-orange-400' }
-  }
-
-  if (lower === '.vscode' || lower === '.vs') {
-    return { Icon: FolderCog, className: 'text-sky-400' }
-  }
-
-  if (lower === 'node_modules') {
-    return { Icon: Package, className: 'text-amber-400' }
-  }
-
-  if (
-    lower === 'src' ||
-    lower === 'app' ||
-    lower === 'apps' ||
-    lower === 'api' ||
-    lower === 'controllers' ||
-    lower === 'services' ||
-    lower === 'contracts' ||
-    lower === 'data' ||
-    lower === 'components' ||
-    lower === 'pages' ||
-    lower === 'hooks' ||
-    lower === 'lib' ||
-    lower === 'utils'
-  ) {
-    return { Icon: FolderCode, className: 'text-sky-400' }
-  }
-
-  if (
-    lower === 'config' ||
-    lower === 'configs' ||
-    lower === 'settings' ||
-    lower === 'scripts' ||
-    lower === 'tools'
-  ) {
-    return { Icon: FolderCog, className: 'text-emerald-400' }
-  }
-
-  if (
-    lower === 'dist' ||
-    lower === 'build' ||
-    lower === 'out' ||
-    lower === 'bin' ||
-    lower === 'obj'
-  ) {
-    return { Icon: FolderArchive, className: 'text-muted-foreground' }
-  }
-
-  if (lower === 'public' || lower === 'static' || lower === 'assets') {
-    return { Icon: FolderOpen, className: 'text-pink-400' }
-  }
-
-  if (lower === 'docs' || lower === 'doc') {
-    return { Icon: FolderOpen, className: 'text-muted-foreground' }
-  }
-
-  return defaultDirectoryIcon
-}
-
-function DirectoryLabel({ name }: { name: string }) {
-  const { Icon, className } = getDirectoryIconSpec(name)
-  return (
-    <span className="flex min-w-0 items-center gap-2">
-      <Icon className={cn('size-4 shrink-0', className)} />
-      <span className="truncate">{name}</span>
-    </span>
-  )
-}
-
-function normalizePathForComparison(path: string): string {
-  return path.replace(/[\\/]+$/, '').toLowerCase()
-}
-
-function getParentPath(fullPath: string): string | null {
-  const normalized = fullPath.replace(/[\\/]+$/, '')
-  const lastSeparator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
-  if (lastSeparator < 0) return null
-
-  const parent = normalized.slice(0, lastSeparator)
-  if (!parent) return null
-  if (/^[a-zA-Z]:$/.test(parent)) return `${parent}\\`
-  return parent
+type DiffPreview = {
+  loading: boolean
+  error: string | null
+  diff: string
+  truncated: boolean
 }
 
 function getBaseName(fullPath: string): string {
@@ -293,740 +65,251 @@ function getBaseName(fullPath: string): string {
   return base || normalized
 }
 
-function splitFileSystemPath(path: string): string[] {
-  const normalized = path.replace(/\//g, '\\').replace(/[\\]+$/, '')
-  return normalized.split('\\').filter(Boolean)
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
 }
 
-function getRelativePath(fromPath: string, toPath: string): string | null {
-  const fromParts = splitFileSystemPath(fromPath)
-  const toParts = splitFileSystemPath(toPath)
-
-  if (!fromParts.length || !toParts.length) return null
-
-  const fromRoot = fromParts[0].toLowerCase()
-  const toRoot = toParts[0].toLowerCase()
-  if (fromRoot !== toRoot) return null
-
-  let common = 0
-  while (
-    common < fromParts.length &&
-    common < toParts.length &&
-    fromParts[common].toLowerCase() === toParts[common].toLowerCase()
-  ) {
-    common += 1
-  }
-
-  const up = new Array(Math.max(0, fromParts.length - common)).fill('..')
-  const down = toParts.slice(common)
-  const combined = [...up, ...down]
-  return combined.join('\\') || '.'
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return true
-    } catch {
-      // fall back
-    }
-  }
-
-  try {
-    if (typeof document === 'undefined') return false
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.style.position = 'fixed'
-    textarea.style.top = '0'
-    textarea.style.left = '0'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(textarea)
-    return ok
-  } catch {
-    return false
+function getTabKey(tab: WorkspaceTab): string {
+  switch (tab.kind) {
+    case 'file':
+      return `file:${tab.path}`
+    case 'diff':
+      return `diff:${tab.file}`
+    case 'panel':
+      return `panel:${tab.panelId}`
   }
 }
 
-function FsContextMenu({
-  open,
-  x,
-  y,
-  onClose,
-  children,
-}: {
-  open: boolean
-  x: number
-  y: number
-  onClose: () => void
-  children: ReactNode
-}) {
-  useEffect(() => {
-    if (!open) return
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-
-    const onScroll = () => onClose()
-
-    window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('scroll', onScroll, true)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('scroll', onScroll, true)
-    }
-  }, [open, onClose])
-
-  if (!open) return null
-  if (typeof document === 'undefined') return null
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50"
-      onMouseDown={onClose}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        onClose()
-      }}
-      role="presentation"
-    >
-      <div
-        className="fixed min-w-[240px] max-w-[320px] max-h-[calc(100vh-16px)] overflow-auto rounded-md border bg-popover text-popover-foreground shadow-md"
-        style={{ left: x, top: y }}
-        onMouseDown={(e) => e.stopPropagation()}
-        onContextMenu={(e) => e.preventDefault()}
-        role="menu"
-      >
-        {children}
-      </div>
-    </div>,
-    document.body,
-  )
+export type ProjectWorkspaceHandle = {
+  openFile: (path: string) => void
+  openProjectSummary: () => void
 }
 
-type ChatRole = 'user' | 'agent' | 'system'
-
-type ChatMessage = {
-  id: string
-  role: ChatRole
-  text: string
+type ProjectWorkspacePageProps = {
+  projectId?: string
 }
 
-type CodexEventLogItem = {
-  receivedAtUtc: string
-  method?: string
-  raw: string
+function formatDurationMs(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
 }
 
-type A2aStatusUpdate = {
-  taskId: string
-  contextId: string
-  final?: boolean
-  status?: {
-    state?: string
-    timestamp?: string
-    message?: {
-      role?: string
-      messageId?: string
-      taskId?: string
-      contextId?: string
-      parts?: unknown[]
-    }
-  }
-}
-
-type A2aArtifactUpdate = {
-  taskId: string
-  contextId: string
-  append?: boolean
-  lastChunk?: boolean
-  artifact?: {
-    artifactId?: string
-    name?: string
-    parts?: unknown[]
-  }
-}
-
-function getApiBase(): string {
+function sumSessionTokens(s: ProjectSessionDto): number {
   return (
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:5210'
+    (s.tokenUsage?.inputTokens ?? 0) +
+    (s.tokenUsage?.cachedInputTokens ?? 0) +
+    (s.tokenUsage?.outputTokens ?? 0) +
+    (s.tokenUsage?.reasoningOutputTokens ?? 0)
   )
 }
 
-function randomId(prefix = 'id'): string {
-  try {
-    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-      return `${prefix}-${crypto.randomUUID()}`
-    }
-  } catch {
-    // fall back
-  }
+function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
+  const workspacePath = project.workspacePath.trim()
 
-  return `${prefix}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
-}
+  const [sessions, setSessions] = useState<ProjectSessionDto[] | null>(null)
+  const [hasGitRepo, setHasGitRepo] = useState<boolean | null>(null)
+  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-async function* readSseText(response: Response): AsyncGenerator<string, void, unknown> {
-  if (!response.body) return
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
 
-  let buffer = ''
-  let dataLines: string[] = []
+    try {
+      const [sessionsData, gitExists] = await Promise.all([
+        api.projects.sessions(project.id),
+        workspacePath
+          ? api.fs.hasGitRepo(workspacePath).catch(() => false)
+          : Promise.resolve(false),
+      ])
 
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done })
+      setSessions(sessionsData)
+      setHasGitRepo(gitExists)
 
-    let idx = buffer.indexOf('\n')
-    while (idx >= 0) {
-      const rawLine = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 1)
-
-      const line = rawLine.replace(/\r$/, '').replace(/^\uFEFF/, '')
-      if (!line) {
-        if (dataLines.length) {
-          yield dataLines.join('\n')
-          dataLines = []
-        }
-      } else if (line.startsWith('data:')) {
-        dataLines.push(line.slice(5).trimStart())
+      if (gitExists && workspacePath) {
+        const status = await api.git.status(workspacePath)
+        setGitStatus(status)
+      } else {
+        setGitStatus(null)
       }
-
-      idx = buffer.indexOf('\n')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
     }
-
-    if (done) {
-      if (dataLines.length) {
-        yield dataLines.join('\n')
-      }
-      break
-    }
-  }
-}
-
-function readPartsText(parts: unknown[] | undefined): string {
-  if (!parts?.length) return ''
-  const chunks: string[] = []
-  for (const part of parts) {
-    if (!part || typeof part !== 'object') continue
-    const p = part as { text?: unknown }
-    if (typeof p.text === 'string' && p.text) chunks.push(p.text)
-  }
-  return chunks.join('')
-}
-
-function ProjectChatAndDetails({
-  project,
-  detailsOpen,
-  detailsPortalTarget,
-}: {
-  project: ProjectDto
-  detailsOpen: boolean
-  detailsPortalTarget: HTMLDivElement | null
-}) {
-  const apiBase = useMemo(() => getApiBase(), [])
-  const sessionIdRef = useRef<string>(randomId('ctx'))
-
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [draft, setDraft] = useState('')
-  const [sending, setSending] = useState(false)
-  const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
-  const [canceling, setCanceling] = useState(false)
-  const [chatError, setChatError] = useState<string | null>(null)
-
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
-
-  const [thinkingOpen, setThinkingOpen] = useState(false)
-  const [reasoning, setReasoning] = useState('')
-  const [toolOutput, setToolOutput] = useState('')
-  const [diffText, setDiffText] = useState('')
-  const [tokenUsage, setTokenUsage] = useState<unknown>(null)
-  const [rawEvents, setRawEvents] = useState<CodexEventLogItem[]>([])
+  }, [project.id, workspacePath])
 
   useEffect(() => {
-    if (!scrollRef.current) return
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  }, [messages])
+    void load()
+  }, [load])
 
-  const updateAgentMessage = useCallback((messageId: string, updater: (prev: string) => string) => {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === messageId ? { ...m, text: updater(m.text) } : m)),
+  const sessionsSummary = useMemo(() => {
+    const data = sessions ?? []
+    const durationMs = data.reduce((acc, s) => acc + (s.durationMs ?? 0), 0)
+    const tokenTotal = data.reduce((acc, s) => acc + sumSessionTokens(s), 0)
+    const eventTotals = data.reduce(
+      (acc, s) => {
+        acc.message += s.eventCounts?.message ?? 0
+        acc.functionCall += s.eventCounts?.functionCall ?? 0
+        acc.agentReasoning += s.eventCounts?.agentReasoning ?? 0
+        acc.tokenCount += s.eventCounts?.tokenCount ?? 0
+        acc.other += s.eventCounts?.other ?? 0
+        return acc
+      },
+      { message: 0, functionCall: 0, agentReasoning: 0, tokenCount: 0, other: 0 },
     )
-  }, [])
 
-  const send = useCallback(async () => {
-    const text = draft.trim()
-    if (!text || sending) return
-
-    setChatError(null)
-    setDraft('')
-    setReasoning('')
-    setToolOutput('')
-    setDiffText('')
-    setTokenUsage(null)
-    setRawEvents([])
-
-    const taskId = randomId('task')
-    const userMessageId = `msg-user-${taskId}`
-    const agentMessageId = `msg-agent-${taskId}`
-
-    setMessages((prev) => [
-      ...prev,
-      { id: userMessageId, role: 'user', text },
-      { id: agentMessageId, role: 'agent', text: '' },
-    ])
-
-    setSending(true)
-    setThinkingOpen(true)
-    setActiveTaskId(taskId)
-    setCanceling(false)
-
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    try {
-      const request = {
-        jsonrpc: '2.0',
-        id: randomId('req'),
-        method: 'tasks/sendSubscribe',
-        params: {
-          cwd: project.workspacePath,
-          contextId: sessionIdRef.current,
-          taskId,
-          message: {
-            role: 'user',
-            messageId: userMessageId,
-            contextId: sessionIdRef.current,
-            taskId,
-            parts: [{ text }],
-          },
-        },
-      }
-
-      const res = await fetch(`${apiBase}/a2a`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-        },
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      })
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '')
-        throw new Error(errText || `${res.status} ${res.statusText}`)
-      }
-
-      for await (const data of readSseText(res)) {
-        if (!data) continue
-
-        let payload: unknown
-        try {
-          payload = JSON.parse(data)
-        } catch {
-          continue
-        }
-
-        if (!payload || typeof payload !== 'object') continue
-        const envelope = payload as { error?: unknown; result?: unknown }
-
-        if (envelope.error) {
-          const message =
-            typeof envelope.error === 'object' && envelope.error
-              ? (envelope.error as { message?: unknown }).message
-              : undefined
-          throw new Error(typeof message === 'string' ? message : 'A2A error')
-        }
-
-        const result = envelope.result ?? null
-        if (!result) continue
-
-        if (typeof result !== 'object') continue
-        const resultObj = result as {
-          statusUpdate?: unknown
-          artifactUpdate?: unknown
-        }
-
-        const statusUpdate = (resultObj.statusUpdate ?? null) as A2aStatusUpdate | null
-        if (statusUpdate?.status?.message?.messageId) {
-          const messageId = statusUpdate.status.message.messageId
-          const parts = statusUpdate.status.message.parts as unknown[] | undefined
-          const chunk = readPartsText(parts)
-
-          if (messageId === agentMessageId && chunk) {
-            if (statusUpdate.final) {
-              updateAgentMessage(agentMessageId, () => chunk)
-            } else {
-              updateAgentMessage(agentMessageId, (prev) => prev + chunk)
-            }
-          }
-
-          if (statusUpdate.final) {
-            setThinkingOpen(false)
-            setSending(false)
-            setActiveTaskId(null)
-            setCanceling(false)
-          }
-        }
-
-        const artifactUpdate = (resultObj.artifactUpdate ?? null) as A2aArtifactUpdate | null
-        const artifact = artifactUpdate?.artifact
-        const artifactName = artifact?.name ?? ''
-
-        if (artifactName === 'reasoning') {
-          const parts = (artifact?.parts ?? []) as unknown[]
-          const chunk = readPartsText(parts)
-          if (chunk) setReasoning((prev) => prev + chunk)
-          continue
-        }
-
-        if (artifactName === 'tool-output' || artifactName === 'stderr') {
-          const parts = (artifact?.parts ?? []) as unknown[]
-          const chunk = readPartsText(parts)
-          if (chunk) setToolOutput((prev) => prev + chunk)
-          continue
-        }
-
-        if (artifactName === 'diff') {
-          const parts = (artifact?.parts ?? []) as unknown[]
-          const chunk = readPartsText(parts)
-          if (chunk) setDiffText(chunk)
-          continue
-        }
-
-        if (artifactName === 'token-usage') {
-          const parts = (artifact?.parts ?? []) as unknown[]
-          for (const part of parts) {
-            if (!part || typeof part !== 'object') continue
-            const dataValue = (part as { data?: unknown }).data
-            if (dataValue !== undefined) {
-              setTokenUsage(dataValue)
-              break
-            }
-          }
-          continue
-        }
-
-        if (artifactName === 'codex-events') {
-          const parts = (artifact?.parts ?? []) as unknown[]
-          for (const part of parts) {
-            if (!part || typeof part !== 'object') continue
-            const dataValue = (part as { data?: unknown }).data
-            if (!dataValue || typeof dataValue !== 'object') continue
-
-            const dataObj = dataValue as {
-              receivedAtUtc?: unknown
-              method?: unknown
-              raw?: unknown
-            }
-
-            const receivedAtUtc = String(dataObj.receivedAtUtc ?? '')
-            const method = typeof dataObj.method === 'string' ? dataObj.method : undefined
-            const raw = typeof dataObj.raw === 'string' ? dataObj.raw : ''
-            if (!raw) continue
-            setRawEvents((prev) => [...prev, { receivedAtUtc, method, raw }])
-          }
-        }
-      }
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        setChatError((e as Error).message)
-      }
-      setSending(false)
-      setThinkingOpen(false)
-      setActiveTaskId(null)
-      setCanceling(false)
+    return {
+      count: data.length,
+      durationMs,
+      tokenTotal,
+      eventTotals,
     }
-  }, [apiBase, draft, project.workspacePath, sending, updateAgentMessage])
+  }, [sessions])
 
-  const cancel = useCallback(async () => {
-    if (!activeTaskId || !sending || canceling) return
-    setCanceling(true)
-    setChatError(null)
+  const gitSummary = useMemo(() => {
+    if (!gitStatus) return null
 
-    try {
-      const request = {
-        jsonrpc: '2.0',
-        id: randomId('req'),
-        method: 'tasks/cancel',
-        params: {
-          id: activeTaskId,
-        },
-      }
+    const staged = gitStatus.entries.filter((e) => e.indexStatus !== ' ').length
+    const worktree = gitStatus.entries.filter((e) => e.worktreeStatus !== ' ').length
+    const untracked = gitStatus.entries.filter(
+      (e) => e.indexStatus === '?' && e.worktreeStatus === '?',
+    ).length
 
-      const res = await fetch(`${apiBase}/a2a`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'application/json',
-        },
-        body: JSON.stringify(request),
-      })
-
-      const payload = await res.json().catch(() => null)
-      if (!res.ok) {
-        const errText = typeof payload === 'string' ? payload : null
-        throw new Error(errText || `${res.status} ${res.statusText}`)
-      }
-
-      if (payload?.error) {
-        throw new Error(payload?.error?.message ?? '取消失败')
-      }
-    } catch (e) {
-      setChatError((e as Error).message)
-      setCanceling(false)
+    return {
+      branch: gitStatus.branch,
+      repoRoot: gitStatus.repoRoot,
+      total: gitStatus.entries.length,
+      staged,
+      worktree,
+      untracked,
     }
-  }, [activeTaskId, apiBase, canceling, sending])
+  }, [gitStatus])
 
   return (
-    <>
-      <section className="relative min-w-0 flex-1 overflow-hidden rounded-lg border bg-card flex flex-col">
-        <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{project.name}</div>
-            <div className="truncate text-xs text-muted-foreground">{project.workspacePath}</div>
+    <div className="h-full min-h-0 overflow-auto p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">项目数据汇总</div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">
+            {project.name} · {project.toolType === 'Codex' ? 'Codex' : 'Claude Code'}
+          </div>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          刷新
+          {loading ? <Spinner /> : null}
+        </Button>
+      </div>
+
+      {error ? (
+        <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border bg-card p-4">
+          <div className="text-sm font-medium">项目信息</div>
+          <div className="mt-3 space-y-1 text-sm">
+            <div className="break-all">路径：{project.workspacePath}</div>
+            <div>
+              Provider：{project.providerName || project.providerId || '—'}
+            </div>
+            <div>Model：{project.model ?? '—'}</div>
+            <div>创建：{formatUtc(project.createdAtUtc)}</div>
+            <div>更新：{formatUtc(project.updatedAtUtc)}</div>
+            <div>最近启动：{formatUtc(project.lastStartedAtUtc) || '—'}</div>
           </div>
         </div>
 
-        {chatError ? (
-          <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
-            {chatError}
-          </div>
-        ) : null}
-
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 pt-6 pb-40">
-          {messages.length ? null : (
-            <div className="flex h-full min-h-[160px] items-center justify-center text-center">
-              <div className="max-w-sm text-sm text-muted-foreground">
-                在这里开始对话：输入问题或指令。
+        <div className="rounded-lg border bg-card p-4">
+          <div className="text-sm font-medium">会话统计</div>
+          {sessions ? (
+            <div className="mt-3 space-y-1 text-sm">
+              <div>会话数：{sessionsSummary.count.toLocaleString()}</div>
+              <div>总耗时：{formatDurationMs(sessionsSummary.durationMs)}</div>
+              <div>总 Tokens：{sessionsSummary.tokenTotal.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground">
+                消息 {sessionsSummary.eventTotals.message.toLocaleString()} · 工具{' '}
+                {sessionsSummary.eventTotals.functionCall.toLocaleString()} · 思考{' '}
+                {sessionsSummary.eventTotals.agentReasoning.toLocaleString()}
               </div>
+            </div>
+          ) : (
+            <div className="mt-3 text-sm text-muted-foreground">
+              {loading ? '统计中…' : '暂无数据'}
             </div>
           )}
-
-          <div className="space-y-2">
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={cn(
-                  'mx-auto flex w-full max-w-3xl py-1',
-                  m.role === 'user' ? 'justify-end' : 'justify-start',
-                )}
-              >
-                <div
-                  className={cn(
-                    'max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
-                    m.role === 'user'
-                      ? 'bg-primary text-primary-foreground'
-                      : m.role === 'agent'
-                        ? 'bg-muted text-foreground'
-                        : 'bg-accent text-accent-foreground',
-                  )}
-                >
-                  {m.text ? (
-                    m.text
-                  ) : m.role === 'agent' && sending ? (
-                    <span className="inline-flex items-center">
-                      <Spinner />
-                    </span>
-                  ) : (
-                    ''
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
+      </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-card via-card/80 to-transparent px-4 pb-4 pt-10">
-          <div className="pointer-events-auto mx-auto max-w-3xl">
-            <div className="rounded-2xl border bg-background/80 p-2 shadow-lg backdrop-blur">
-              <div className="flex items-end gap-2">
-                <textarea
-                  className="min-h-[44px] max-h-[180px] w-full flex-1 resize-none rounded-xl bg-background px-3 py-2 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
-                  placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-                  value={draft}
-                  disabled={sending}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      void send()
-                    }
-                  }}
-                />
-                {sending ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void cancel()}
-                    disabled={canceling}
-                  >
-                    {canceling ? '停止中…' : '停止'}
-                  </Button>
-                ) : (
-                  <Button type="button" onClick={() => void send()} disabled={!draft.trim()}>
-                    发送
-                  </Button>
-                )}
-              </div>
+      <div className="mt-4 rounded-lg border bg-card p-4">
+        <div className="text-sm font-medium">Git 状态</div>
+        {hasGitRepo === false ? (
+          <div className="mt-2 text-sm text-muted-foreground">未检测到 Git 仓库</div>
+        ) : null}
+        {hasGitRepo && gitSummary ? (
+          <div className="mt-3 space-y-1 text-sm">
+            <div>分支：{gitSummary.branch ?? '—'}</div>
+            <div className="break-all">根目录：{gitSummary.repoRoot}</div>
+            <div>
+              变更：{gitSummary.total.toLocaleString()}（暂存{' '}
+              {gitSummary.staged.toLocaleString()} · 工作区{' '}
+              {gitSummary.worktree.toLocaleString()} · 未跟踪{' '}
+              {gitSummary.untracked.toLocaleString()}）
             </div>
           </div>
-        </div>
-      </section>
-
-      {detailsOpen && detailsPortalTarget
-        ? createPortal(
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="border-b px-3 py-2">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between text-sm"
-                  onClick={() => setThinkingOpen((v) => !v)}
-                >
-                  <span>思考</span>
-                  <span className="text-xs text-muted-foreground">
-                    {thinkingOpen ? '收起' : sending ? '展开（生成中）' : '展开'}
-                  </span>
-                </button>
-                {thinkingOpen ? (
-                  <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-                    {reasoning || (sending ? '（等待思考内容…）' : '（无）')}
-                  </pre>
-                ) : null}
-              </div>
-
-              <div className="border-b px-3 py-2">
-                <div className="text-sm">工具输出</div>
-                <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-                  {toolOutput || '（无）'}
-                </pre>
-              </div>
-
-              <div className="border-b px-3 py-2">
-                <div className="text-sm">Diff</div>
-                <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
-                  {diffText || '（无）'}
-                </pre>
-              </div>
-
-              <div className="border-b px-3 py-2">
-                <div className="text-sm">Token</div>
-                <pre className="mt-2 max-h-[160px] overflow-auto whitespace-pre rounded-md bg-muted p-2 text-xs">
-                  {tokenUsage ? JSON.stringify(tokenUsage, null, 2) : '（无）'}
-                </pre>
-              </div>
-
-              <div className="px-3 py-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm">Raw Events</div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={!rawEvents.length}
-                    onClick={() => setRawEvents([])}
-                  >
-                    清空
-                  </Button>
-                </div>
-                <div className="mt-2 space-y-2">
-                  {rawEvents.length ? null : (
-                    <div className="text-xs text-muted-foreground">（无）</div>
-                  )}
-                  {rawEvents.map((e, idx) => (
-                    <div
-                      key={`${e.receivedAtUtc}-${idx}`}
-                      className="rounded-md border bg-background p-2"
-                    >
-                      <div className="truncate text-[11px] text-muted-foreground">
-                        {e.receivedAtUtc} {e.method ?? ''}
-                      </div>
-                      <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
-                        {e.raw}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>,
-            detailsPortalTarget,
-          )
-        : null}
-    </>
+        ) : hasGitRepo ? (
+          <div className="mt-2 text-sm text-muted-foreground">
+            {loading ? '加载中…' : '暂无数据'}
+          </div>
+        ) : null}
+      </div>
+    </div>
   )
 }
 
-export function ProjectWorkspacePage() {
-  const { id } = useParams()
+export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWorkspacePageProps>(
+  function ProjectWorkspacePage({ projectId }: ProjectWorkspacePageProps, ref) {
+  const { id: routeId } = useParams()
+  const [searchParams] = useSearchParams()
+  const id =
+    projectId ??
+    routeId ??
+    searchParams.get('projects') ??
+    searchParams.get('project') ??
+    undefined
+
   const [project, setProject] = useState<ProjectDto | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [fsNotice, setFsNotice] = useState<string | null>(null)
-  const fsNoticeTimerRef = useRef<number | null>(null)
-  const [sidePanelOpen, setSidePanelOpen] = useState(true)
-  const [filesPanelOpen, setFilesPanelOpen] = useState(true)
-  const [detailsPanelOpen, setDetailsPanelOpen] = useState(false)
-  const [detailsPortalTarget, setDetailsPortalTarget] =
-    useState<HTMLDivElement | null>(null)
 
-  const showFsNotice = useCallback((message: string) => {
-    setFsNotice(message)
-    if (typeof window === 'undefined') return
+  const [toolsPanelOpen, setToolsPanelOpen] = useState(true)
+  const [fileManagerOpen, setFileManagerOpen] = useState(true)
+  const [fileManagerWidthPx, setFileManagerWidthPx] = useState(320)
+  const fileManagerWidthInitializedRef = useRef(false)
 
-    if (fsNoticeTimerRef.current) {
-      window.clearTimeout(fsNoticeTimerRef.current)
-    }
+  const workspaceBodyRef = useRef<HTMLDivElement | null>(null)
+  const resizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const [resizing, setResizing] = useState(false)
 
-    fsNoticeTimerRef.current = window.setTimeout(() => {
-      setFsNotice(null)
-      fsNoticeTimerRef.current = null
-    }, 1800)
-  }, [])
+  const [tabs, setTabs] = useState<WorkspaceTab[]>([])
+  const [activeView, setActiveView] = useState<WorkspaceView>({ kind: 'empty' })
+  const [filePreviewByPath, setFilePreviewByPath] = useState<Record<string, FilePreview>>({})
+  const [diffPreviewByFile, setDiffPreviewByFile] = useState<Record<string, DiffPreview>>({})
+  const previewInFlightRef = useRef<Set<string>>(new Set())
+  const diffInFlightRef = useRef<Set<string>>(new Set())
 
-  useEffect(() => {
-    return () => {
-      if (typeof window === 'undefined') return
-      if (fsNoticeTimerRef.current) {
-        window.clearTimeout(fsNoticeTimerRef.current)
-      }
-    }
-  }, [])
-
-  const [fsMenu, setFsMenu] = useState<{ x: number; y: number; target: FsEntryTarget } | null>(
-    null,
-  )
-
-  const closeFsMenu = useCallback(() => setFsMenu(null), [])
-
-  const openFsMenu = useCallback((e: ReactMouseEvent, target: FsEntryTarget) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (typeof window === 'undefined') return
-
-    const menuWidth = 240
-    const menuHeight = 320
-    const x = Math.min(e.clientX, Math.max(0, window.innerWidth - menuWidth))
-    const y = Math.min(e.clientY, Math.max(0, window.innerHeight - menuHeight))
-    setFsMenu({ x, y, target })
-  }, [])
-
-  const [renameTarget, setRenameTarget] = useState<FsEntryTarget | null>(null)
-  const [renameDraft, setRenameDraft] = useState('')
-  const [renameBusy, setRenameBusy] = useState(false)
-  const [renameError, setRenameError] = useState<string | null>(null)
-
-  const [deleteTarget, setDeleteTarget] = useState<FsEntryTarget | null>(null)
-  const [deleteBusy, setDeleteBusy] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-
-  const [createBusy, setCreateBusy] = useState(false)
+  const [detailsPortalTarget, setDetailsPortalTarget] = useState<HTMLDivElement | null>(null)
+  const detailsOpen = activeView.kind === 'output'
 
   const load = useCallback(async () => {
     if (!id) return
@@ -1042,563 +325,595 @@ export function ProjectWorkspacePage() {
     }
   }, [id])
 
-  const inFlightRef = useRef<Set<string>>(new Set())
-  const [entriesByPath, setEntriesByPath] = useState<
-    Record<string, Pick<ListEntriesResponse, 'directories' | 'files'>>
-  >({})
-  const entriesByPathRef = useRef(entriesByPath)
-  const [nodeLoadingByPath, setNodeLoadingByPath] = useState<Record<string, boolean>>({})
-  const [nodeErrorByPath, setNodeErrorByPath] = useState<Record<string, string | null>>({})
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const workspacePath = (project?.workspacePath ?? '').trim()
 
   useEffect(() => {
-    entriesByPathRef.current = entriesByPath
-  }, [entriesByPath])
+    setTabs([])
+    setActiveView({ kind: 'empty' })
+    setFilePreviewByPath({})
+    setDiffPreviewByFile({})
+  }, [workspacePath])
 
-  const resetEntries = useCallback(() => {
-    inFlightRef.current.clear()
-    setEntriesByPath({})
-    entriesByPathRef.current = {}
-    setNodeLoadingByPath({})
-    setNodeErrorByPath({})
+  useEffect(() => {
+    if (!toolsPanelOpen) return
+    if (!fileManagerOpen) return
+    if (fileManagerWidthInitializedRef.current) return
+    const container = workspaceBodyRef.current
+    if (!container) return
+    const width = container.clientWidth
+    if (!width) return
+
+    const min = 240
+    const max = Math.max(min, Math.floor(width * 0.6))
+    setFileManagerWidthPx(clamp(Math.round(width / 3), min, max))
+    fileManagerWidthInitializedRef.current = true
+  }, [fileManagerOpen, toolsPanelOpen])
+
+  const fetchPreview = useCallback(async (path: string) => {
+    if (previewInFlightRef.current.has(path)) return
+    previewInFlightRef.current.add(path)
+
+    setFilePreviewByPath((prev) => ({
+      ...prev,
+      [path]: {
+        loading: true,
+        error: null,
+        content: prev[path]?.content ?? '',
+        truncated: prev[path]?.truncated ?? false,
+        isBinary: prev[path]?.isBinary ?? false,
+      },
+    }))
+
+    try {
+      const data = await api.fs.readFile(path)
+      setFilePreviewByPath((prev) => ({
+        ...prev,
+        [path]: {
+          loading: false,
+          error: null,
+          content: data.content,
+          truncated: data.truncated,
+          isBinary: data.isBinary,
+        },
+      }))
+    } catch (e) {
+      setFilePreviewByPath((prev) => ({
+        ...prev,
+        [path]: {
+          loading: false,
+          error: (e as Error).message,
+          content: prev[path]?.content ?? '',
+          truncated: prev[path]?.truncated ?? false,
+          isBinary: prev[path]?.isBinary ?? false,
+        },
+      }))
+    } finally {
+      previewInFlightRef.current.delete(path)
+    }
   }, [])
 
-  const ensureEntries = useCallback(
-    async (path: string) => {
-      const normalizedPath = path.trim()
-      if (!normalizedPath) return
-      if (entriesByPathRef.current[normalizedPath]) return
-      if (inFlightRef.current.has(normalizedPath)) return
+  const fetchDiff = useCallback(
+    async (file: string) => {
+      const path = workspacePath.trim()
+      if (!path) return
 
-      inFlightRef.current.add(normalizedPath)
-      setNodeLoadingByPath((s) => ({ ...s, [normalizedPath]: true }))
-      setNodeErrorByPath((s) => ({ ...s, [normalizedPath]: null }))
+      if (diffInFlightRef.current.has(file)) return
+      diffInFlightRef.current.add(file)
+
+      setDiffPreviewByFile((prev) => ({
+        ...prev,
+        [file]: {
+          loading: true,
+          error: null,
+          diff: prev[file]?.diff ?? '',
+          truncated: prev[file]?.truncated ?? false,
+        },
+      }))
+
       try {
-        const data = await api.fs.listEntries(normalizedPath)
-        setEntriesByPath((s) => {
-          const next = {
-            ...s,
-            [normalizedPath]: { directories: data.directories, files: data.files },
-            [data.currentPath]: { directories: data.directories, files: data.files },
-          }
-          entriesByPathRef.current = next
+        const data = await api.git.diff(path, file)
+        setDiffPreviewByFile((prev) => ({
+          ...prev,
+          [file]: {
+            loading: false,
+            error: null,
+            diff: data.diff,
+            truncated: data.truncated,
+          },
+        }))
+      } catch (e) {
+        setDiffPreviewByFile((prev) => ({
+          ...prev,
+          [file]: {
+            loading: false,
+            error: (e as Error).message,
+            diff: prev[file]?.diff ?? '',
+            truncated: prev[file]?.truncated ?? false,
+          },
+        }))
+      } finally {
+        diffInFlightRef.current.delete(file)
+      }
+    },
+    [workspacePath],
+  )
+
+  const openFile = useCallback(
+    (path: string) => {
+      const normalized = path.trim()
+      if (!normalized) return
+      setToolsPanelOpen(true)
+
+      setTabs((prev) => {
+        const exists = prev.some((t) => t.kind === 'file' && t.path === normalized)
+        if (exists) return prev
+        return [...prev, { kind: 'file', path: normalized }]
+      })
+
+      setActiveView({ kind: 'file', path: normalized })
+
+      const existing = filePreviewByPath[normalized]
+      if (!existing) {
+        void fetchPreview(normalized)
+      }
+    },
+    [fetchPreview, filePreviewByPath],
+  )
+
+  const openDiff = useCallback(
+    (file: string) => {
+      const normalized = file.trim()
+      if (!normalized) return
+      setToolsPanelOpen(true)
+
+      setTabs((prev) => {
+        const exists = prev.some((t) => t.kind === 'diff' && t.file === normalized)
+        if (exists) return prev
+        return [...prev, { kind: 'diff', file: normalized }]
+      })
+
+      setActiveView({ kind: 'diff', file: normalized })
+
+      const existing = diffPreviewByFile[normalized]
+      if (!existing) {
+        void fetchDiff(normalized)
+      }
+    },
+    [diffPreviewByFile, fetchDiff],
+  )
+
+  const openProjectSummary = useCallback(() => {
+    setToolsPanelOpen(true)
+    setTabs((prev) => {
+      const exists = prev.some((t) => t.kind === 'panel' && t.panelId === 'project-summary')
+      if (exists) return prev
+      return [...prev, { kind: 'panel', panelId: 'project-summary' }]
+    })
+    setActiveView({ kind: 'panel', panelId: 'project-summary' })
+  }, [])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openFile,
+      openProjectSummary,
+    }),
+    [openFile, openProjectSummary],
+  )
+
+  const closeTab = useCallback(
+    (tab: WorkspaceTab) => {
+      const key = getTabKey(tab)
+
+      setTabs((prev) => {
+        const next = prev.filter((t) => getTabKey(t) !== key)
+
+        setActiveView((view) => {
+          const isActive =
+            (tab.kind === 'file' && view.kind === 'file' && view.path === tab.path) ||
+            (tab.kind === 'diff' && view.kind === 'diff' && view.file === tab.file)
+          if (!isActive) return view
+
+          const last = next[next.length - 1]
+          if (!last) return { kind: 'empty' }
+          return last.kind === 'file'
+            ? { kind: 'file', path: last.path }
+            : { kind: 'diff', file: last.file }
+        })
+
+        return next
+      })
+
+      if (tab.kind === 'file') {
+        setFilePreviewByPath((prev) => {
+          const next = { ...prev }
+          delete next[tab.path]
           return next
         })
-      } catch (e) {
-        setNodeErrorByPath((s) => ({ ...s, [normalizedPath]: (e as Error).message }))
-      } finally {
-        inFlightRef.current.delete(normalizedPath)
-        setNodeLoadingByPath((s) => ({ ...s, [normalizedPath]: false }))
+      } else {
+        setDiffPreviewByFile((prev) => {
+          const next = { ...prev }
+          delete next[tab.file]
+          return next
+        })
       }
     },
     [],
   )
 
-  const invalidateFsCache = useCallback(
-    (changedPath: string) => {
-      const changedNorm = normalizePathForComparison(changedPath)
-      const parentPath = getParentPath(changedPath)
-      const parentNorm = parentPath ? normalizePathForComparison(parentPath) : null
+  const startResize = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (!fileManagerOpen) return
+      const container = workspaceBodyRef.current
+      if (!container) return
 
-      const shouldRemove = (key: string) => {
-        const keyNorm = normalizePathForComparison(key)
-        if (parentNorm && keyNorm === parentNorm) return true
-        if (keyNorm === changedNorm) return true
-        return keyNorm.startsWith(`${changedNorm}\\`) || keyNorm.startsWith(`${changedNorm}/`)
-      }
-
-      setEntriesByPath((s) => {
-        const next: typeof s = {}
-        for (const [key, value] of Object.entries(s)) {
-          if (!shouldRemove(key)) next[key] = value
-        }
-        entriesByPathRef.current = next
-        return next
-      })
-
-      setNodeLoadingByPath((s) => {
-        const next: typeof s = {}
-        for (const [key, value] of Object.entries(s)) {
-          if (!shouldRemove(key)) next[key] = value
-        }
-        return next
-      })
-
-      setNodeErrorByPath((s) => {
-        const next: typeof s = {}
-        for (const [key, value] of Object.entries(s)) {
-          if (!shouldRemove(key)) next[key] = value
-        }
-        return next
-      })
-
-      if (parentPath) {
-        void ensureEntries(parentPath)
-      }
+      resizeStateRef.current = { startX: e.clientX, startWidth: fileManagerWidthPx }
+      setResizing(true)
+      e.currentTarget.setPointerCapture(e.pointerId)
     },
-    [ensureEntries],
+    [fileManagerOpen, fileManagerWidthPx],
   )
 
-  const handleCopyPath = useCallback(
-    async (path: string) => {
-      const ok = await copyTextToClipboard(path)
-      showFsNotice(ok ? '已复制绝对路径' : '复制失败：请手动复制')
+  const moveResize = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (!resizing) return
+      const state = resizeStateRef.current
+      const container = workspaceBodyRef.current
+      if (!state || !container) return
+
+      const width = container.clientWidth
+      if (!width) return
+
+      const delta = e.clientX - state.startX
+      const min = 240
+      const minRight = 360
+      const max = Math.max(min, width - minRight)
+      const next = clamp(state.startWidth + delta, min, max)
+      setFileManagerWidthPx(next)
     },
-    [showFsNotice],
+    [resizing],
   )
 
-  const handleCopyRelativePath = useCallback(
-    async (path: string) => {
-      const root = (project?.workspacePath ?? '').trim()
-      if (!root) {
-        await handleCopyPath(path)
-        return
-      }
-
-      const relative = getRelativePath(root, path)
-      if (!relative) {
-        await handleCopyPath(path)
-        showFsNotice('已复制绝对路径（无法计算相对路径）')
-        return
-      }
-
-      const ok = await copyTextToClipboard(relative)
-      showFsNotice(ok ? '已复制相对路径' : '复制失败：请手动复制')
-    },
-    [handleCopyPath, project?.workspacePath, showFsNotice],
-  )
-
-  const handleRevealInExplorer = useCallback(
-    async (path: string) => {
-      try {
-        await api.fs.revealInExplorer(path)
-      } catch (e) {
-        showFsNotice((e as Error).message)
-      }
-    },
-    [showFsNotice],
-  )
-
-  const handleOpenTerminal = useCallback(
-    async (path: string) => {
-      try {
-        await api.fs.openTerminal(path)
-      } catch (e) {
-        showFsNotice((e as Error).message)
-      }
-    },
-    [showFsNotice],
-  )
-
-  const handleCopyName = useCallback(
-    async (name: string) => {
-      const ok = await copyTextToClipboard(name)
-      showFsNotice(ok ? '已复制名称' : '复制失败：请手动复制')
-    },
-    [showFsNotice],
-  )
-
-  const createEntryAndRename = useCallback(
-    async (kind: FsEntryKind, anchor: FsEntryTarget) => {
-      if (createBusy) return
-
-      const parentPath =
-        anchor.kind === 'directory' ? anchor.fullPath : getParentPath(anchor.fullPath)
-      if (!parentPath) {
-        showFsNotice('无法确定父目录')
-        return
-      }
-
-      const defaultName = kind === 'directory' ? '新建文件夹' : '新建文件.txt'
-      const existing = entriesByPathRef.current[parentPath]
-      const used = new Set<string>()
-      if (existing) {
-        for (const d of existing.directories) used.add(d.name.toLowerCase())
-        for (const f of existing.files) used.add(f.name.toLowerCase())
-      }
-
-      const makeCandidate = (index: number) => {
-        if (index <= 0) return defaultName
-        if (kind === 'directory') return `${defaultName} (${index})`
-
-        const dot = defaultName.lastIndexOf('.')
-        if (dot > 0) {
-          const base = defaultName.slice(0, dot)
-          const ext = defaultName.slice(dot)
-          return `${base} (${index})${ext}`
-        }
-        return `${defaultName} (${index})`
-      }
-
-      setCreateBusy(true)
-      try {
-        let createdPath: string | null = null
-        for (let i = 0; i < 50; i += 1) {
-          const candidate = makeCandidate(i)
-          if (used.has(candidate.toLowerCase())) continue
-
-          try {
-            const created = await api.fs.createEntry({ parentPath, name: candidate, kind })
-            createdPath = created.fullPath
-            break
-          } catch (e) {
-            const message = (e as Error).message
-            if (message.includes('Destination already exists')) continue
-            throw e
-          }
-        }
-
-        if (!createdPath) {
-          showFsNotice('创建失败：名称冲突')
-          return
-        }
-
-        invalidateFsCache(createdPath)
-
-        const createdName = getBaseName(createdPath)
-        setRenameTarget({ kind, name: createdName, fullPath: createdPath })
-        setRenameDraft(createdName)
-        setRenameBusy(false)
-        setRenameError(null)
-      } catch (e) {
-        showFsNotice((e as Error).message)
-      } finally {
-        setCreateBusy(false)
-      }
-    },
-    [createBusy, invalidateFsCache, showFsNotice],
-  )
-
-  const beginRename = useCallback((target: FsEntryTarget) => {
-    setRenameTarget(target)
-    setRenameDraft(target.name)
-    setRenameBusy(false)
-    setRenameError(null)
+  const stopResize = useCallback(() => {
+    resizeStateRef.current = null
+    setResizing(false)
   }, [])
 
-  const submitRename = useCallback(async () => {
-    if (!renameTarget) return
+  const mainTabs = useMemo(() => {
+    return tabs.map((tab) => {
+      if (tab.kind === 'file') {
+        return { ...tab, key: getTabKey(tab), label: getBaseName(tab.path), title: tab.path }
+      }
 
-    const newName = renameDraft.trim()
-    if (!newName) {
-      setRenameError('名称不能为空')
-      return
-    }
+      return {
+        ...tab,
+        key: getTabKey(tab),
+        label: `Diff: ${getBaseName(tab.file)}`,
+        title: tab.file,
+      }
+    })
+  }, [tabs])
 
-    if (newName === renameTarget.name) {
-      setRenameTarget(null)
-      setRenameError(null)
-      return
-    }
-
-    setRenameBusy(true)
-    setRenameError(null)
-    try {
-      await api.fs.renameEntry({ path: renameTarget.fullPath, newName })
-      invalidateFsCache(renameTarget.fullPath)
-      setRenameTarget(null)
-      setRenameDraft('')
-      showFsNotice('已重命名')
-    } catch (e) {
-      setRenameError((e as Error).message)
-    } finally {
-      setRenameBusy(false)
-    }
-  }, [invalidateFsCache, renameDraft, renameTarget, showFsNotice])
-
-  const beginDelete = useCallback((target: FsEntryTarget) => {
-    setDeleteTarget(target)
-    setDeleteBusy(false)
-    setDeleteError(null)
-  }, [])
-
-  const confirmDelete = useCallback(async () => {
-    if (!deleteTarget) return
-
-    setDeleteBusy(true)
-    setDeleteError(null)
-    try {
-      await api.fs.deleteEntry(deleteTarget.fullPath)
-      invalidateFsCache(deleteTarget.fullPath)
-      setDeleteTarget(null)
-      showFsNotice('已删除')
-    } catch (e) {
-      setDeleteError((e as Error).message)
-    } finally {
-      setDeleteBusy(false)
-    }
-  }, [deleteTarget, invalidateFsCache, showFsNotice])
-
-  useEffect(() => {
-    resetEntries()
-    if (!project?.workspacePath) return
-    void ensureEntries(project.workspacePath)
-  }, [ensureEntries, project?.workspacePath, resetEntries])
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  const rootPath = (project?.workspacePath ?? '').trim()
-  const rootEntries = rootPath ? entriesByPath[rootPath] : undefined
-
-  const renderFile = useCallback(
-    (file: FileEntryDto) => {
+  const renderMain = () => {
+    if (activeView.kind === 'terminal') {
       return (
-        <FileItem
-          key={file.fullPath}
-          onContextMenu={(e) =>
-            openFsMenu(e, { kind: 'file', name: file.name, fullPath: file.fullPath })
-          }
-        >
-          <FileLabel name={file.name} />
-        </FileItem>
+        <div className="h-full min-h-0 overflow-auto px-4 py-6">
+          <div className="text-sm font-medium">Terminal</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            当前版本暂未提供内置终端。可以打开外部终端继续工作。
+          </div>
+          <div className="mt-4">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!workspacePath}
+              onClick={() => void api.fs.openTerminal(workspacePath)}
+            >
+              在终端打开
+            </Button>
+          </div>
+        </div>
       )
-    },
-    [openFsMenu],
-  )
+    }
 
-  const renderDirectory = useCallback(
-    (dir: DirectoryEntryDto) => {
-      const children = entriesByPath[dir.fullPath]
-      const nodeLoading = Boolean(nodeLoadingByPath[dir.fullPath])
-      const nodeError = nodeErrorByPath[dir.fullPath]
+    if (activeView.kind === 'output') {
+      return <div ref={setDetailsPortalTarget} className="h-full min-h-0 overflow-hidden" />
+    }
+
+    if (activeView.kind === 'diff') {
+      const preview = diffPreviewByFile[activeView.file]
+      if (!preview || preview.loading) {
+        return (
+          <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
+            <span className="inline-flex items-center gap-2">
+              <Spinner /> 加载中…
+            </span>
+          </div>
+        )
+      }
+
+      if (preview.error) {
+        return (
+          <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-destructive">
+            {preview.error}
+          </div>
+        )
+      }
 
       return (
-        <FolderItem key={dir.fullPath} value={dir.fullPath}>
-          <FolderTrigger
-            onClick={(e) => {
-              e.stopPropagation()
-              void ensureEntries(dir.fullPath)
-            }}
-            onContextMenu={(e) =>
-              openFsMenu(e, { kind: 'directory', name: dir.name, fullPath: dir.fullPath })
-            }
-          >
-            <DirectoryLabel name={dir.name} />
-          </FolderTrigger>
-
-          <FolderContent>
-            {nodeError ? (
-              <div className="px-2 py-2 text-sm text-destructive">{nodeError}</div>
-            ) : null}
-
-            {nodeLoading ? (
-              <div className="px-2 py-2 text-sm text-muted-foreground">加载中…</div>
-            ) : null}
-
-            {!nodeLoading && children ? (
-              <div className="space-y-1">
-                {children.directories.length || children.files.length ? null : (
-                  <div className="px-2 py-2 text-sm text-muted-foreground">暂无内容</div>
-                )}
-
-                {children.directories.length ? (
-                  <SubFiles>{children.directories.map(renderDirectory)}</SubFiles>
-                ) : null}
-
-                {children.files.length ? (
-                  <div className="px-2">{children.files.map(renderFile)}</div>
-                ) : null}
-              </div>
-            ) : null}
-          </FolderContent>
-        </FolderItem>
+        <div className="h-full min-h-0 overflow-hidden flex flex-col">
+          {preview.truncated ? (
+            <div className="border-b bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+              Diff 已截断（仅展示前一部分）。
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {preview.diff ? (
+              <ShikiCode code={preview.diff} language="diff" className="h-full" />
+            ) : (
+              <div className="px-4 py-4 text-xs text-muted-foreground">（无 diff）</div>
+            )}
+          </div>
+        </div>
       )
-    },
-    [ensureEntries, entriesByPath, nodeErrorByPath, nodeLoadingByPath, openFsMenu, renderFile],
-  )
-
-  const rootFilesView = useMemo(() => {
-    if (!project) return null
-
-    if (!rootPath) {
-      return <div className="px-4 py-6 text-sm text-muted-foreground">未设置工作空间</div>
     }
 
-    const nodeLoading = Boolean(nodeLoadingByPath[rootPath])
-    const nodeError = nodeErrorByPath[rootPath]
-    if (nodeError) {
-      return <div className="px-4 py-6 text-sm text-destructive">{nodeError}</div>
-    }
+    if (activeView.kind === 'file') {
+      const preview = filePreviewByPath[activeView.path]
+      if (!preview || preview.loading) {
+        return (
+          <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
+            <span className="inline-flex items-center gap-2">
+              <Spinner /> 加载中…
+            </span>
+          </div>
+        )
+      }
 
-    if (nodeLoading || !rootEntries) {
-      return <div className="px-4 py-6 text-sm text-muted-foreground">加载中…</div>
-    }
+      if (preview.error) {
+        return (
+          <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-destructive">
+            {preview.error}
+          </div>
+        )
+      }
 
-    if (!rootEntries.directories.length && !rootEntries.files.length) {
-      return <div className="px-4 py-6 text-sm text-muted-foreground">暂无文件</div>
+      if (preview.isBinary) {
+        return (
+          <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-muted-foreground">
+            该文件可能是二进制文件，暂不支持预览。
+          </div>
+        )
+      }
+
+      return (
+        <div className="h-full min-h-0 overflow-hidden flex flex-col">
+          {preview.truncated ? (
+            <div className="border-b bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+              内容已截断（仅展示前一部分）。
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {preview.content ? (
+              <MonacoCode code={preview.content} filePath={activeView.path} className="h-full" />
+            ) : (
+              <div className="px-4 py-4 text-xs text-muted-foreground">（空文件）</div>
+            )}
+          </div>
+        </div>
+      )
     }
 
     return (
-      <Files className="h-full">
-        {rootEntries.directories.map(renderDirectory)}
-        {rootEntries.files.map(renderFile)}
-      </Files>
+      <div className="flex h-full min-h-0 items-center justify-center text-center">
+        <div className="max-w-sm">
+          <div className="text-sm font-medium">No tabs open</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            预览一个文件，或打开终端开始工作。
+          </div>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <Button type="button" variant="outline" onClick={() => setActiveView({ kind: 'terminal' })}>
+              打开终端
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setActiveView({ kind: 'output' })}>
+              工具输出
+            </Button>
+          </div>
+        </div>
+      </div>
     )
-  }, [
-    project,
-    renderDirectory,
-    renderFile,
-    rootEntries,
-    rootPath,
-    nodeErrorByPath,
-    nodeLoadingByPath,
-  ])
+  }
 
   return (
     <div className="h-full min-h-0 overflow-hidden flex flex-col">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="truncate text-lg font-semibold">
-            {project?.name ?? (loading ? '加载中…' : '项目')}
-          </div>
-          <div className="truncate text-sm text-muted-foreground">
-            {project?.workspacePath ?? (loading ? '正在获取项目详情…' : '')}
-          </div>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          <Button type="button" variant="outline" onClick={() => window.history.back()}>
-            返回
-          </Button>
-          <Button type="button" variant="outline" onClick={() => void load()} disabled={loading}>
-            刷新
-          </Button>
-        </div>
-      </div>
-
       {error ? (
         <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
           {error}
         </div>
       ) : null}
 
-      <div
-        className={cn(
-          'min-h-0 flex-1 overflow-hidden flex',
-          sidePanelOpen ? 'gap-4' : '',
-        )}
-      >
-        {project ? (
-          <ProjectChatAndDetails
-            key={project.id}
-            project={project}
-            detailsOpen={detailsPanelOpen}
-            detailsPortalTarget={detailsPortalTarget}
-          />
-        ) : (
-          <section className="min-w-0 flex-1 overflow-hidden rounded-lg border bg-card flex flex-col">
+      <div className={cn('min-h-0 flex-1 overflow-hidden flex', toolsPanelOpen ? 'gap-4' : '')}>
+        <section
+          className={cn(
+            'min-h-0 overflow-hidden rounded-lg border bg-card flex flex-col',
+            toolsPanelOpen ? 'w-[620px] shrink-0' : 'flex-1',
+          )}
+        >
+          {project ? (
+            <ProjectChat
+              key={project.id}
+              project={project}
+              detailsOpen={detailsOpen}
+              detailsPortalTarget={detailsPortalTarget}
+            />
+          ) : (
             <div className="min-h-0 flex-1 overflow-hidden p-4 text-sm text-muted-foreground">
               {loading ? '加载中…' : '未找到项目。'}
             </div>
-          </section>
-        )}
-
-        <aside
-          aria-hidden={!sidePanelOpen}
-          className={cn(
-            'shrink-0 overflow-hidden rounded-lg bg-card flex flex-col',
-            'transition-all duration-200 ease-out',
-            sidePanelOpen
-              ? 'w-[360px] border opacity-100 translate-x-0'
-              : 'w-0 border-0 opacity-0 translate-x-2 pointer-events-none',
           )}
-        >
-          <div className="flex items-center justify-between border-b px-3 py-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="收起侧边栏"
-              onClick={() => setSidePanelOpen(false)}
-            >
-              <PanelRightClose className="size-4" />
-            </Button>
-          </div>
+        </section>
 
-          <div className="min-h-0 flex-1 overflow-hidden flex flex-col">
-            <button
-              type="button"
-              className={cn(
-                'flex w-full items-center gap-2 border-b px-3 py-2 text-xs font-medium text-muted-foreground',
-                'hover:bg-accent/40',
-              )}
-              onClick={() => setFilesPanelOpen((v) => !v)}
-            >
-              <ChevronDown
-                className={cn(
-                  'size-4 transition-transform',
-                  filesPanelOpen ? 'rotate-0' : '-rotate-90',
-                )}
-              />
-              <span>文件</span>
-            </button>
+        {toolsPanelOpen && project ? (
+          <aside className="min-w-0 flex-1 overflow-hidden rounded-lg border bg-card flex flex-col">
+            <div className="flex items-center justify-between gap-2 border-b px-2 py-1.5">
+              <div className="flex items-center gap-1">
+                {!fileManagerOpen ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    title="打开文件管理"
+                    onClick={() => setFileManagerOpen(true)}
+                  >
+                    <Folder className="size-4" />
+                  </Button>
+                ) : null}
 
-            <div
-              aria-hidden={!filesPanelOpen}
-              className={cn(
-                'min-h-0 overflow-hidden flex flex-col basis-0 transition-all duration-200 ease-out',
-                filesPanelOpen ? 'grow opacity-100' : 'grow-0 opacity-0',
-                !filesPanelOpen && 'pointer-events-none',
-              )}
-            >
-              {fsNotice ? (
-                <div className="p-2">
-                  <Alert className="py-2">
-                    <AlertDescription>{fsNotice}</AlertDescription>
-                  </Alert>
-                </div>
-              ) : null}
-              <div
-                className="min-h-0 flex-1 overflow-hidden"
-                onContextMenu={(e) => {
-                  if (!rootPath) return
-                  openFsMenu(e, {
-                    kind: 'directory',
-                    name: getBaseName(rootPath),
-                    fullPath: rootPath,
-                  })
-                }}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="终端"
+                  onClick={() => setActiveView({ kind: 'terminal' })}
+                >
+                  <Terminal className="size-4" />
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="工具输出"
+                  onClick={() => setActiveView({ kind: 'output' })}
+                >
+                  <FileText className="size-4" />
+                </Button>
+              </div>
+
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="收起工具栏"
+                onClick={() => setToolsPanelOpen(false)}
               >
-                {rootFilesView}
+                <PanelRightClose className="size-4" />
+              </Button>
+            </div>
+
+            <div ref={workspaceBodyRef} className="min-h-0 flex-1 overflow-hidden flex">
+              {fileManagerOpen ? (
+                <>
+                  <div className="shrink-0 overflow-hidden" style={{ width: fileManagerWidthPx }}>
+                    <ProjectFileManager
+                      workspacePath={workspacePath}
+                      onRequestClose={() => setFileManagerOpen(false)}
+                      onOpenFile={openFile}
+                      onOpenDiff={openDiff}
+                      className="h-full"
+                    />
+                  </div>
+
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    className={cn(
+                      'w-1 shrink-0 cursor-col-resize bg-border/30',
+                      'hover:bg-border/60',
+                      resizing ? 'bg-border' : '',
+                    )}
+                    onPointerDown={startResize}
+                    onPointerMove={moveResize}
+                    onPointerUp={stopResize}
+                    onPointerCancel={stopResize}
+                  />
+                </>
+              ) : null}
+
+              <div className="min-w-0 flex-1 overflow-hidden flex flex-col">
+                <div className="shrink-0 border-b px-2 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1 overflow-x-auto">
+                      <div className="flex min-w-fit items-center gap-1">
+                        {mainTabs.map((tab) => {
+                          const active =
+                            (tab.kind === 'file' &&
+                              activeView.kind === 'file' &&
+                              activeView.path === tab.path) ||
+                            (tab.kind === 'diff' &&
+                              activeView.kind === 'diff' &&
+                              activeView.file === tab.file)
+                          return (
+                            <div
+                              key={tab.key}
+                              className={cn(
+                                'group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs',
+                                'max-w-[220px]',
+                                active
+                                  ? 'bg-accent text-accent-foreground'
+                                  : 'bg-background/40 text-muted-foreground hover:bg-accent/40 hover:text-foreground',
+                              )}
+                            >
+                              <button
+                                type="button"
+                                className="min-w-0 flex-1 truncate text-left"
+                                onClick={() =>
+                                  tab.kind === 'file'
+                                    ? setActiveView({ kind: 'file', path: tab.path })
+                                    : setActiveView({ kind: 'diff', file: tab.file })
+                                }
+                                title={tab.title}
+                              >
+                                {tab.label}
+                              </button>
+                              <button
+                                type="button"
+                                className={cn(
+                                  'rounded-sm p-0.5 text-muted-foreground hover:bg-background/60 hover:text-foreground',
+                                  'opacity-0 group-hover:opacity-100',
+                                  active ? 'opacity-100' : '',
+                                )}
+                                onClick={() => closeTab(tab)}
+                                title="关闭"
+                              >
+                                <X className="size-3" />
+                              </button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+
+                    <Button
+                      type="button"
+                      variant={activeView.kind === 'terminal' ? 'secondary' : 'outline'}
+                      size="sm"
+                      onClick={() => setActiveView({ kind: 'terminal' })}
+                      title="终端"
+                    >
+                      Terminal
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={activeView.kind === 'output' ? 'secondary' : 'outline'}
+                      size="sm"
+                      onClick={() => setActiveView({ kind: 'output' })}
+                      title="工具输出"
+                    >
+                      Output
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-hidden">{renderMain()}</div>
               </div>
             </div>
-
-            <button
-              type="button"
-              className={cn(
-                'flex w-full items-center gap-2 border-t px-3 py-2 text-xs font-medium text-muted-foreground',
-                'hover:bg-accent/40',
-              )}
-              onClick={() => setDetailsPanelOpen((v) => !v)}
-            >
-              <ChevronDown
-                className={cn(
-                  'size-4 transition-transform',
-                  detailsPanelOpen ? 'rotate-0' : '-rotate-90',
-                )}
-              />
-              <span>详情</span>
-            </button>
-
-            <div
-              aria-hidden={!detailsPanelOpen}
-              className={cn(
-                'min-h-0 overflow-hidden flex flex-col basis-0 transition-all duration-200 ease-out',
-                detailsPanelOpen
-                  ? filesPanelOpen
-                    ? 'grow-0 basis-[360px] opacity-100'
-                    : 'grow opacity-100'
-                  : 'grow-0 opacity-0',
-                !detailsPanelOpen && 'pointer-events-none',
-              )}
-            >
-              <div
-                ref={setDetailsPortalTarget}
-                className="min-h-0 flex-1 overflow-hidden"
-              />
-            </div>
-          </div>
-        </aside>
+          </aside>
+        ) : null}
       </div>
 
       <Button
@@ -1606,243 +921,15 @@ export function ProjectWorkspacePage() {
         variant="outline"
         size="icon"
         className={cn(
-          'fixed right-4 top-1/2 z-40 -translate-y-1/2 shadow-md transition-[opacity,transform] duration-200 ease-out',
-          sidePanelOpen
-            ? 'pointer-events-none translate-x-2 opacity-0 scale-95'
-            : 'translate-x-0 opacity-100 scale-100',
+          'fixed right-4 top-4 z-40 shadow-md transition-[opacity,transform] duration-200 ease-out',
+          toolsPanelOpen ? 'pointer-events-none translate-y-1 opacity-0 scale-95' : 'opacity-100',
         )}
-        title="打开资源管理器"
-        onClick={() => setSidePanelOpen(true)}
+        title="展开工具栏"
+        onClick={() => setToolsPanelOpen(true)}
       >
         <PanelRightOpen className="size-4" />
-        <span className="sr-only">打开资源管理器</span>
+        <span className="sr-only">展开工具栏</span>
       </Button>
-
-      <FsContextMenu
-        open={Boolean(fsMenu)}
-        x={fsMenu?.x ?? 0}
-        y={fsMenu?.y ?? 0}
-        onClose={closeFsMenu}
-      >
-        <div className="p-1">
-          <div className="px-2 py-1 text-xs text-muted-foreground truncate">
-            {fsMenu?.target.name}
-          </div>
-          <Separator className="my-1" />
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void handleRevealInExplorer(target.fullPath)
-            }}
-          >
-            {fsMenu?.target.kind === 'directory'
-              ? '在资源管理器中打开'
-              : '在资源管理器中显示'}
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void handleOpenTerminal(target.fullPath)
-            }}
-          >
-            在终端打开
-          </button>
-          <Separator className="my-1" />
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void handleCopyPath(target.fullPath)
-            }}
-          >
-            复制绝对路径
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void handleCopyRelativePath(target.fullPath)
-            }}
-          >
-            复制相对路径
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void handleCopyName(target.name)
-            }}
-          >
-            {fsMenu?.target.kind === 'directory' ? '复制文件夹名' : '复制文件名'}
-          </button>
-          <Separator className="my-1" />
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void createEntryAndRename('file', target)
-            }}
-          >
-            新建文件
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              void createEntryAndRename('directory', target)
-            }}
-          >
-            新建文件夹
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              beginRename(target)
-            }}
-          >
-            重命名
-          </button>
-          <Separator className="my-1" />
-          <button
-            type="button"
-            className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10"
-            onClick={() => {
-              const target = fsMenu?.target
-              if (!target) return
-              closeFsMenu()
-              beginDelete(target)
-            }}
-          >
-            删除
-          </button>
-        </div>
-      </FsContextMenu>
-
-      <Modal
-        open={Boolean(renameTarget)}
-        title={renameTarget?.kind === 'directory' ? '重命名文件夹' : '重命名文件'}
-        onClose={() => {
-          if (renameBusy) return
-          setRenameTarget(null)
-          setRenameDraft('')
-          setRenameError(null)
-        }}
-      >
-        <div className="space-y-3">
-          {renameTarget ? (
-            <div className="text-xs text-muted-foreground break-all">{renameTarget.fullPath}</div>
-          ) : null}
-          <Input
-            value={renameDraft}
-            onChange={(e) => setRenameDraft(e.target.value)}
-            autoFocus
-            disabled={renameBusy}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                void submitRename()
-              }
-            }}
-          />
-          {renameError ? <div className="text-sm text-destructive">{renameError}</div> : null}
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                if (renameBusy) return
-                setRenameTarget(null)
-                setRenameDraft('')
-                setRenameError(null)
-              }}
-              disabled={renameBusy}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void submitRename()}
-              disabled={renameBusy || !renameDraft.trim()}
-            >
-              确定
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      <AlertDialog
-        open={Boolean(deleteTarget)}
-        onOpenChange={(open) => {
-          if (open) return
-          if (deleteBusy) return
-          setDeleteTarget(null)
-          setDeleteError(null)
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              删除{deleteTarget?.kind === 'directory' ? '文件夹' : '文件'}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              确定要删除 “{deleteTarget?.name}” 吗？该操作不可撤销。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {deleteTarget ? (
-            <div className="text-xs text-muted-foreground break-all">{deleteTarget.fullPath}</div>
-          ) : null}
-          {deleteError ? <div className="text-sm text-destructive">{deleteError}</div> : null}
-          <AlertDialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={deleteBusy}
-              onClick={() => {
-                if (deleteBusy) return
-                setDeleteTarget(null)
-                setDeleteError(null)
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={deleteBusy}
-              onClick={() => void confirmDelete()}
-            >
-              删除
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

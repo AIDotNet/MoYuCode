@@ -18,6 +18,12 @@ import type {
   ToolKey,
   ToolStatusDto,
   ToolType,
+  ReadFileResponse,
+  GitCommitRequest,
+  GitCommitResponse,
+  GitDiffResponse,
+  GitLogResponse,
+  GitStatusResponse,
 } from '@/api/types'
 
 const API_BASE =
@@ -92,6 +98,18 @@ export const api = {
         `/api/tools/codex/token-usage/daily?${sp.toString()}`,
       )
     },
+    claudeTokenUsage: (forceRefresh = false) =>
+      http<SessionTokenUsageDto>(
+        `/api/tools/claude/token-usage${forceRefresh ? '?forceRefresh=true' : ''}`,
+      ),
+    claudeTokenUsageDaily: (days = 7, forceRefresh = false) => {
+      const sp = new URLSearchParams()
+      sp.set('days', String(days))
+      if (forceRefresh) sp.set('forceRefresh', 'true')
+      return http<CodexDailyTokenUsageDto[]>(
+        `/api/tools/claude/token-usage/daily?${sp.toString()}`,
+      )
+    },
   },
   jobs: {
     get: (id: string) => http<JobDto>(`/api/jobs/${id}`),
@@ -128,6 +146,10 @@ export const api = {
       http<ListDirectoriesResponse>(`/api/fs/list?path=${encodeURIComponent(path)}`),
     listEntries: (path: string) =>
       http<ListEntriesResponse>(`/api/fs/entries?path=${encodeURIComponent(path)}`),
+    hasGitRepo: (path: string) =>
+      http<boolean>(`/api/fs/has-git?path=${encodeURIComponent(path)}`),
+    readFile: (path: string) =>
+      http<ReadFileResponse>(`/api/fs/file?path=${encodeURIComponent(path)}`),
     deleteEntry: (path: string) =>
       http<void>(`/api/fs/entry?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
     renameEntry: (body: RenameEntryRequest) =>
@@ -144,6 +166,23 @@ export const api = {
       http<void>(`/api/fs/reveal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
     openTerminal: (path: string) =>
       http<void>(`/api/fs/terminal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+  },
+  git: {
+    status: (path: string) =>
+      http<GitStatusResponse>(`/api/git/status?path=${encodeURIComponent(path)}`),
+    log: (path: string, maxCount = 200) =>
+      http<GitLogResponse>(
+        `/api/git/log?path=${encodeURIComponent(path)}&maxCount=${encodeURIComponent(String(maxCount))}`,
+      ),
+    diff: (path: string, file: string) =>
+      http<GitDiffResponse>(
+        `/api/git/diff?path=${encodeURIComponent(path)}&file=${encodeURIComponent(file)}`,
+      ),
+    commit: (body: GitCommitRequest) =>
+      http<GitCommitResponse>(`/api/git/commit`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
 }
 

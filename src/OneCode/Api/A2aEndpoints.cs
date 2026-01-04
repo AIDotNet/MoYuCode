@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using OneCode.Infrastructure;
 using OneCode.Services.A2a;
 
 namespace OneCode.Api;
@@ -10,13 +11,13 @@ public static class A2aEndpoints
     {
         app.MapGet("/.well-known/agent.json", (HttpContext httpContext) =>
         {
-            return Results.Json(BuildAgentCard(httpContext));
+            return Results.Json(BuildAgentCard(httpContext),JsonOptions.DefaultOptions);
         });
 
         // Optional compatibility: some clients prepend the A2A base path.
         app.MapGet("/a2a/.well-known/agent.json", (HttpContext httpContext) =>
         {
-            return Results.Json(BuildAgentCard(httpContext));
+            return Results.Json(BuildAgentCard(httpContext),JsonOptions.DefaultOptions);
         });
 
         app.MapPost("/a2a", HandleJsonRpcAsync);
@@ -129,7 +130,7 @@ public static class A2aEndpoints
                 cancellationToken);
         }
 
-        return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32601, message: $"Unsupported method: {method}"));
+        return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32601, message: $"Unsupported method: {method}"),JsonOptions.DefaultOptions);
     }
 
     private static async Task HandleSendSubscribeAsync(
@@ -268,12 +269,12 @@ public static class A2aEndpoints
 
         if (string.IsNullOrWhiteSpace(taskId))
         {
-            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Missing params.id"));
+            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Missing params.id"),JsonOptions.DefaultOptions);
         }
 
         if (!a2aTaskManager.TryGetSnapshot(taskId, out var snapshot))
         {
-            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Task not found."));
+            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Task not found."),JsonOptions.DefaultOptions);
         }
 
         var artifacts = new List<object>();
@@ -373,7 +374,7 @@ public static class A2aEndpoints
                     },
                 },
             },
-        });
+        },JsonOptions.DefaultOptions);
     }
 
     private static async Task<IResult> HandleCancelTaskAsync(
@@ -388,12 +389,12 @@ public static class A2aEndpoints
 
         if (string.IsNullOrWhiteSpace(taskId))
         {
-            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Missing params.id"));
+            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Missing params.id"),JsonOptions.DefaultOptions);
         }
 
         if (!a2aTaskManager.TryGetSnapshot(taskId, out _))
         {
-            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Task not found."));
+            return Results.Json(BuildJsonRpcError(requestId, hasRequestId, code: -32602, message: "Task not found."),JsonOptions.DefaultOptions);
         }
 
         var ok = await a2aTaskManager.RequestCancelAsync(taskId, cancellationToken);
@@ -407,7 +408,7 @@ public static class A2aEndpoints
             {
                 success = ok,
             },
-        });
+        },JsonOptions.DefaultOptions);
     }
 
     private static async Task StreamTaskEventsAsync(

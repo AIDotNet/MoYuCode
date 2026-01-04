@@ -174,7 +174,7 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
 
   const openProject = useCallback(
     (id: string) => {
-      navigate(`/projects/${id}`)
+      navigate(`/code?projects=${encodeURIComponent(id)}`)
     },
     [navigate],
   )
@@ -238,6 +238,8 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
     if (!batchForm.providerId) return null
     return providers.find((p) => p.id === batchForm.providerId) ?? null
   }, [batchForm.providerId, providers])
+
+  const toolLabel = toolType === 'Codex' ? 'Codex' : 'Claude Code'
 
   const openCreate = () => {
     setEditing(null)
@@ -308,8 +310,9 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
           readErrors: number
           jsonErrors: number
         }
+        const scannedLabel = toolType === 'Codex' ? '扫描文件' : '扫描目录'
         appendScanLog(
-          `完成：扫描文件 ${summary.scannedFiles}，cwd ${summary.uniqueCwds}，创建 ${summary.created}，跳过已存在 ${summary.skippedExisting}，跳过不存在目录 ${summary.skippedMissingWorkspace}。`,
+          `完成：${scannedLabel} ${summary.scannedFiles}，cwd ${summary.uniqueCwds}，创建 ${summary.created}，跳过已存在 ${summary.skippedExisting}，跳过不存在目录 ${summary.skippedMissingWorkspace}。`,
         )
         if (summary.readErrors || summary.jsonErrors) {
           appendScanLog(
@@ -520,16 +523,14 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {toolType === 'Codex' ? (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={startScan}
-              disabled={scanRunning}
-            >
-              自动扫描项目
-            </Button>
-          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={startScan}
+            disabled={scanRunning}
+          >
+            自动扫描项目
+          </Button>
           <Button type="button" onClick={openCreate}>
             添加项目
           </Button>
@@ -770,19 +771,17 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
               >
                 打开
               </button>
-              {toolType === 'Codex' ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                  onClick={() => {
-                    setOpenActionsId(null)
-                    setSessionsProject(actionsProject)
-                  }}
-                >
-                  所有会话
-                </button>
-              ) : null}
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpenActionsId(null)
+                  setSessionsProject(actionsProject)
+                }}
+              >
+                所有会话
+              </button>
               <button
                 type="button"
                 role="menuitem"
@@ -936,7 +935,13 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                 list={selectedProvider?.models?.length ? modelDatalistId : undefined}
                 value={form.model}
                 onChange={(e) => setForm((s) => ({ ...s, model: e.target.value }))}
-                placeholder={selectedProvider ? '可直接输入或从列表选择' : '例如：gpt-5.1-codex-max'}
+                placeholder={
+                  selectedProvider
+                    ? '可直接输入或从列表选择'
+                    : toolType === 'Codex'
+                      ? '例如：gpt-5.1-codex-max'
+                      : '例如：claude-3-5-sonnet-latest'
+                }
               />
               {selectedProvider?.models?.length ? (
                 <datalist id={modelDatalistId}>
@@ -1078,8 +1083,20 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
       >
         <div className="space-y-3">
           <div className="text-xs text-muted-foreground">
-            扫描 Codex sessions（~/.codex/sessions）下所有 jsonl 文件的首行，读取
-            <code className="px-1">payload.cwd</code> 并自动创建项目。
+            {toolType === 'Codex' ? (
+              <>
+                扫描 <span className="font-medium text-foreground">{toolLabel}</span>{' '}
+                sessions（<code className="px-1">~/.codex/sessions</code>）下所有
+                jsonl 文件的首行，读取 <code className="px-1">payload.cwd</code>{' '}
+                并自动创建项目。
+              </>
+            ) : (
+              <>
+                扫描 <span className="font-medium text-foreground">{toolLabel}</span>{' '}
+                projects（<code className="px-1">~/.claude/projects</code>）下所有项目目录，
+                读取会话日志中的 <code className="px-1">cwd</code> 并自动创建项目。
+              </>
+            )}
           </div>
           <div className="rounded-md border bg-muted/30 p-3 font-mono text-xs whitespace-pre-wrap">
             <div className="max-h-[55vh] overflow-y-auto">

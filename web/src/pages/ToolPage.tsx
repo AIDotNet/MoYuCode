@@ -24,62 +24,77 @@ import { TokenUsageBar, TokenUsageDailyChart } from '@/components/CodexSessionVi
 
 type TabKey = 'overview' | 'sessions' | 'projects'
 
-const CODEX_USAGE_CACHE_KEY = 'onecode:codex:token-usage:total:v1'
-const CODEX_USAGE_CACHE_TTL_MS = 2 * 60 * 1000
-const CODEX_DAILY_USAGE_CACHE_KEY = 'onecode:codex:token-usage:daily:7:v1'
-const CODEX_DAILY_USAGE_CACHE_TTL_MS = 2 * 60 * 1000
+const TOOL_USAGE_CACHE_TTL_MS = 2 * 60 * 1000
+const TOOL_USAGE_CACHE_KEYS: Record<ToolType, string> = {
+  Codex: 'onecode:codex:token-usage:total:v1',
+  ClaudeCode: 'onecode:claude:token-usage:total:v1',
+}
 
-type CodexTokenUsageCache = {
+const TOOL_DAILY_USAGE_CACHE_TTL_MS = 2 * 60 * 1000
+const TOOL_DAILY_USAGE_CACHE_KEYS: Record<ToolType, string> = {
+  Codex: 'onecode:codex:token-usage:daily:7:v1',
+  ClaudeCode: 'onecode:claude:token-usage:daily:7:v1',
+}
+
+type ToolTokenUsageCache = {
   cachedAt: number
   data: SessionTokenUsageDto
 }
 
-function readCodexTokenUsageCache(): CodexTokenUsageCache | null {
+function readToolTokenUsageCache(toolType: ToolType): ToolTokenUsageCache | null {
   try {
-    const raw = localStorage.getItem(CODEX_USAGE_CACHE_KEY)
+    const raw = localStorage.getItem(TOOL_USAGE_CACHE_KEYS[toolType])
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<CodexTokenUsageCache>
+    const parsed = JSON.parse(raw) as Partial<ToolTokenUsageCache>
     if (!parsed || typeof parsed !== 'object') return null
     if (typeof parsed.cachedAt !== 'number') return null
     if (!parsed.data) return null
-    return parsed as CodexTokenUsageCache
+    return parsed as ToolTokenUsageCache
   } catch {
     return null
   }
 }
 
-function writeCodexTokenUsageCache(data: SessionTokenUsageDto) {
+function writeToolTokenUsageCache(toolType: ToolType, data: SessionTokenUsageDto) {
   try {
-    const payload: CodexTokenUsageCache = { cachedAt: Date.now(), data }
-    localStorage.setItem(CODEX_USAGE_CACHE_KEY, JSON.stringify(payload))
+    const payload: ToolTokenUsageCache = { cachedAt: Date.now(), data }
+    localStorage.setItem(TOOL_USAGE_CACHE_KEYS[toolType], JSON.stringify(payload))
   } catch {
     // ignore
   }
 }
 
-type CodexDailyTokenUsageCache = {
+type ToolDailyTokenUsageCache = {
   cachedAt: number
   data: CodexDailyTokenUsageDto[]
 }
 
-function readCodexDailyTokenUsageCache(): CodexDailyTokenUsageCache | null {
+function readToolDailyTokenUsageCache(
+  toolType: ToolType,
+): ToolDailyTokenUsageCache | null {
   try {
-    const raw = localStorage.getItem(CODEX_DAILY_USAGE_CACHE_KEY)
+    const raw = localStorage.getItem(TOOL_DAILY_USAGE_CACHE_KEYS[toolType])
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<CodexDailyTokenUsageCache>
+    const parsed = JSON.parse(raw) as Partial<ToolDailyTokenUsageCache>
     if (!parsed || typeof parsed !== 'object') return null
     if (typeof parsed.cachedAt !== 'number') return null
     if (!Array.isArray(parsed.data)) return null
-    return parsed as CodexDailyTokenUsageCache
+    return parsed as ToolDailyTokenUsageCache
   } catch {
     return null
   }
 }
 
-function writeCodexDailyTokenUsageCache(data: CodexDailyTokenUsageDto[]) {
+function writeToolDailyTokenUsageCache(
+  toolType: ToolType,
+  data: CodexDailyTokenUsageDto[],
+) {
   try {
-    const payload: CodexDailyTokenUsageCache = { cachedAt: Date.now(), data }
-    localStorage.setItem(CODEX_DAILY_USAGE_CACHE_KEY, JSON.stringify(payload))
+    const payload: ToolDailyTokenUsageCache = { cachedAt: Date.now(), data }
+    localStorage.setItem(
+      TOOL_DAILY_USAGE_CACHE_KEYS[toolType],
+      JSON.stringify(payload),
+    )
   } catch {
     // ignore
   }
@@ -87,6 +102,7 @@ function writeCodexDailyTokenUsageCache(data: CodexDailyTokenUsageDto[]) {
 
 export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
   const toolType: ToolType = tool === 'codex' ? 'Codex' : 'ClaudeCode'
+  const toolLabel = toolType === 'Codex' ? 'Codex' : 'Claude Code'
   const [searchParams, setSearchParams] = useSearchParams()
 
   const [status, setStatus] = useState<ToolStatusDto | null>(null)
@@ -94,22 +110,19 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
   const [error, setError] = useState<string | null>(null)
   const [installJob, setInstallJob] = useState<JobDto | null>(null)
 
-  const [codexTokenUsage, setCodexTokenUsage] =
+  const [tokenUsage, setTokenUsage] =
     useState<SessionTokenUsageDto | null>(null)
-  const [codexTokenUsageLoading, setCodexTokenUsageLoading] = useState(false)
-  const [codexTokenUsageError, setCodexTokenUsageError] = useState<string | null>(
-    null,
-  )
-  const [codexDailyTokenUsage, setCodexDailyTokenUsage] = useState<
+  const [tokenUsageLoading, setTokenUsageLoading] = useState(false)
+  const [tokenUsageError, setTokenUsageError] = useState<string | null>(null)
+  const [dailyTokenUsage, setDailyTokenUsage] = useState<
     CodexDailyTokenUsageDto[] | null
   >(null)
-  const [codexDailyTokenUsageLoading, setCodexDailyTokenUsageLoading] =
+  const [dailyTokenUsageLoading, setDailyTokenUsageLoading] =
     useState(false)
-  const [codexDailyTokenUsageError, setCodexDailyTokenUsageError] = useState<
-    string | null
-  >(null)
+  const [dailyTokenUsageError, setDailyTokenUsageError] =
+    useState<string | null>(null)
 
-  const [codexProjects, setCodexProjects] = useState<ProjectDto[]>([])
+  const [sessionsProjects, setSessionsProjects] = useState<ProjectDto[]>([])
   const [sessionsProjectId, setSessionsProjectId] = useState<string | null>(null)
   const [sessionsProjectsLoading, setSessionsProjectsLoading] = useState(false)
   const [sessionsProjectsError, setSessionsProjectsError] = useState<string | null>(
@@ -123,7 +136,7 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
       { key: 'overview', label: '首页' },
     ]
 
-    if (status?.installed && toolType === 'Codex') {
+    if (status?.installed) {
       tabs.push({ key: 'sessions', label: '会话' })
     }
 
@@ -132,7 +145,7 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
     }
 
     return tabs
-  }, [status?.installed, toolType])
+  }, [status?.installed])
 
   const tab: TabKey = useMemo(() => {
     const isAllowed = allowedTabs.some((t) => t.key === tabParam)
@@ -161,39 +174,41 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
     }
   }, [tool])
 
-  const loadCodexTokenUsage = useCallback(
+  const loadTokenUsage = useCallback(
     async (forceRefresh = false) => {
-      if (toolType !== 'Codex') return
-
-      setCodexTokenUsageLoading(true)
-      setCodexTokenUsageError(null)
+      setTokenUsageLoading(true)
+      setTokenUsageError(null)
       try {
-        const data = await api.tools.codexTokenUsage(forceRefresh)
-        setCodexTokenUsage(data)
-        writeCodexTokenUsageCache(data)
+        const data =
+          toolType === 'Codex'
+            ? await api.tools.codexTokenUsage(forceRefresh)
+            : await api.tools.claudeTokenUsage(forceRefresh)
+        setTokenUsage(data)
+        writeToolTokenUsageCache(toolType, data)
       } catch (e) {
-        setCodexTokenUsageError((e as Error).message)
+        setTokenUsageError((e as Error).message)
       } finally {
-        setCodexTokenUsageLoading(false)
+        setTokenUsageLoading(false)
       }
     },
     [toolType],
   )
 
-  const loadCodexDailyTokenUsage = useCallback(
+  const loadDailyTokenUsage = useCallback(
     async (forceRefresh = false) => {
-      if (toolType !== 'Codex') return
-
-      setCodexDailyTokenUsageLoading(true)
-      setCodexDailyTokenUsageError(null)
+      setDailyTokenUsageLoading(true)
+      setDailyTokenUsageError(null)
       try {
-        const data = await api.tools.codexTokenUsageDaily(7, forceRefresh)
-        setCodexDailyTokenUsage(data)
-        writeCodexDailyTokenUsageCache(data)
+        const data =
+          toolType === 'Codex'
+            ? await api.tools.codexTokenUsageDaily(7, forceRefresh)
+            : await api.tools.claudeTokenUsageDaily(7, forceRefresh)
+        setDailyTokenUsage(data)
+        writeToolDailyTokenUsageCache(toolType, data)
       } catch (e) {
-        setCodexDailyTokenUsageError((e as Error).message)
+        setDailyTokenUsageError((e as Error).message)
       } finally {
-        setCodexDailyTokenUsageLoading(false)
+        setDailyTokenUsageLoading(false)
       }
     },
     [toolType],
@@ -205,47 +220,45 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
 
   useEffect(() => {
     if (tab !== 'overview') return
-    if (toolType !== 'Codex') return
     if (!status?.installed) return
 
-    const cached = readCodexTokenUsageCache()
+    const cached = readToolTokenUsageCache(toolType)
     const now = Date.now()
-    const isFresh = cached ? now - cached.cachedAt <= CODEX_USAGE_CACHE_TTL_MS : false
+    const isFresh = cached ? now - cached.cachedAt <= TOOL_USAGE_CACHE_TTL_MS : false
 
     if (cached?.data) {
-      setCodexTokenUsage(cached.data)
+      setTokenUsage(cached.data)
     }
 
     if (!isFresh) {
       const t = window.setTimeout(() => {
-        void loadCodexTokenUsage(false)
+        void loadTokenUsage(false)
       }, 0)
       return () => window.clearTimeout(t)
     }
-  }, [loadCodexTokenUsage, status?.installed, tab, toolType])
+  }, [loadTokenUsage, status?.installed, tab, toolType])
 
   useEffect(() => {
     if (tab !== 'overview') return
-    if (toolType !== 'Codex') return
     if (!status?.installed) return
 
-    const cached = readCodexDailyTokenUsageCache()
+    const cached = readToolDailyTokenUsageCache(toolType)
     const now = Date.now()
     const isFresh = cached
-      ? now - cached.cachedAt <= CODEX_DAILY_USAGE_CACHE_TTL_MS
+      ? now - cached.cachedAt <= TOOL_DAILY_USAGE_CACHE_TTL_MS
       : false
 
     if (cached?.data) {
-      setCodexDailyTokenUsage(cached.data)
+      setDailyTokenUsage(cached.data)
     }
 
     if (!isFresh) {
       const t = window.setTimeout(() => {
-        void loadCodexDailyTokenUsage(false)
+        void loadDailyTokenUsage(false)
       }, 0)
       return () => window.clearTimeout(t)
     }
-  }, [loadCodexDailyTokenUsage, status?.installed, tab, toolType])
+  }, [loadDailyTokenUsage, status?.installed, tab, toolType])
 
   useEffect(() => {
     if (!status?.installed && (tab === 'projects' || tab === 'sessions')) {
@@ -253,13 +266,12 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
     }
   }, [setTab, status?.installed, tab])
 
-  const loadCodexProjects = useCallback(async () => {
-    if (toolType !== 'Codex') return
+  const loadSessionsProjects = useCallback(async () => {
     setSessionsProjectsLoading(true)
     setSessionsProjectsError(null)
     try {
       const projects = await api.projects.list(toolType)
-      setCodexProjects(projects)
+      setSessionsProjects(projects)
       setSessionsProjectId((current) => {
         if (current && projects.some((p) => p.id === current)) return current
         return projects[0]?.id ?? null
@@ -274,14 +286,13 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
   useEffect(() => {
     if (tab !== 'sessions') return
     if (!status?.installed) return
-    if (toolType !== 'Codex') return
-    void loadCodexProjects()
-  }, [loadCodexProjects, status?.installed, tab, toolType])
+    void loadSessionsProjects()
+  }, [loadSessionsProjects, status?.installed, tab])
 
   const selectedSessionsProject = useMemo(() => {
     if (!sessionsProjectId) return null
-    return codexProjects.find((p) => p.id === sessionsProjectId) ?? null
-  }, [codexProjects, sessionsProjectId])
+    return sessionsProjects.find((p) => p.id === sessionsProjectId) ?? null
+  }, [sessionsProjects, sessionsProjectId])
 
   useEffect(() => {
     if (!installJob) return
@@ -386,37 +397,37 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
                 )}
               </div>
 
-              {toolType === 'Codex' && status?.installed ? (
+              {status?.installed ? (
                 <div className="rounded-lg border bg-card p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-medium">Token 统计</div>
                       <div className="text-xs text-muted-foreground">
-                        汇总本机所有 Codex sessions 的 token 使用（输入 / 缓存 / 输出 / 推理）。
+                        汇总本机所有 {toolLabel} sessions 的 token 使用（输入 / 缓存 / 输出 / 推理）。
                       </div>
                     </div>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => void loadCodexTokenUsage(true)}
-                      disabled={codexTokenUsageLoading}
+                      onClick={() => void loadTokenUsage(true)}
+                      disabled={tokenUsageLoading}
                     >
                       刷新
                     </Button>
                   </div>
 
-                  {codexTokenUsage ? (
-                    <TokenUsageBar usage={codexTokenUsage} className="mt-3" />
+                  {tokenUsage ? (
+                    <TokenUsageBar usage={tokenUsage} className="mt-3" />
                   ) : (
                     <div className="mt-3 text-sm text-muted-foreground">
-                      {codexTokenUsageLoading ? '统计中…' : '暂无数据'}
+                      {tokenUsageLoading ? '统计中…' : '暂无数据'}
                     </div>
                   )}
 
-                  {codexTokenUsageError ? (
+                  {tokenUsageError ? (
                     <div className="mt-2 text-xs text-destructive">
-                      {codexTokenUsageError}
+                      {tokenUsageError}
                     </div>
                   ) : null}
 
@@ -426,40 +437,40 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
                 </div>
               ) : null}
 
-              {toolType === 'Codex' && status?.installed ? (
+              {status?.installed ? (
                 <div className="rounded-lg border bg-card p-4 lg:col-span-2">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-medium">最近 7 天 Token</div>
                       <div className="text-xs text-muted-foreground">
-                        按天统计输入 / 缓存 / 输出 / 思考 token（本机 Codex sessions）。
+                        按天统计输入 / 缓存 / 输出 / 思考 token（本机 {toolLabel} sessions）。
                       </div>
                     </div>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => void loadCodexDailyTokenUsage(true)}
-                      disabled={codexDailyTokenUsageLoading}
+                      onClick={() => void loadDailyTokenUsage(true)}
+                      disabled={dailyTokenUsageLoading}
                     >
                       刷新
                     </Button>
                   </div>
 
-                  {codexDailyTokenUsage ? (
+                  {dailyTokenUsage ? (
                     <TokenUsageDailyChart
-                      days={codexDailyTokenUsage}
+                      days={dailyTokenUsage}
                       className="mt-3"
                     />
                   ) : (
                     <div className="mt-3 text-sm text-muted-foreground">
-                      {codexDailyTokenUsageLoading ? '统计中…' : '暂无数据'}
+                      {dailyTokenUsageLoading ? '统计中…' : '暂无数据'}
                     </div>
                   )}
 
-                  {codexDailyTokenUsageError ? (
+                  {dailyTokenUsageError ? (
                     <div className="mt-2 text-xs text-destructive">
-                      {codexDailyTokenUsageError}
+                      {dailyTokenUsageError}
                     </div>
                   ) : null}
 
@@ -477,20 +488,20 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
             </TabsContent>
           ) : null}
 
-          {status?.installed && toolType === 'Codex' ? (
+          {status?.installed ? (
             <TabsContent value="sessions">
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="text-sm font-medium">会话</div>
                     <div className="text-xs text-muted-foreground">
-                      从本机 Codex sessions 扫描并按工作空间归属展示。
+                      从本机 {toolLabel} sessions 扫描并按工作空间归属展示。
                     </div>
                   </div>
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => void loadCodexProjects()}
+                    onClick={() => void loadSessionsProjects()}
                     disabled={sessionsProjectsLoading}
                   >
                     刷新项目
@@ -509,23 +520,23 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
                     <select
                       className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                       value={sessionsProjectId ?? ''}
-                      disabled={sessionsProjectsLoading || !codexProjects.length}
+                      disabled={sessionsProjectsLoading || !sessionsProjects.length}
                       onChange={(e) => {
                         const next = e.target.value
                         setSessionsProjectId(next ? next : null)
                       }}
                     >
-                      {!codexProjects.length ? (
+                      {!sessionsProjects.length ? (
                         <option value="">（暂无项目）</option>
                       ) : null}
-                      {codexProjects.map((p) => (
+                      {sessionsProjects.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.name}
                         </option>
                       ))}
                     </select>
 
-                    {!codexProjects.length ? (
+                    {!sessionsProjects.length ? (
                       <div className="pt-2 text-xs text-muted-foreground">
                         还没有项目：先到“项目管理”添加，或使用“自动扫描项目”从 sessions
                         生成。

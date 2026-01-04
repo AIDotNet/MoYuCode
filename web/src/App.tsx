@@ -1,9 +1,16 @@
 import type { ReactNode } from 'react'
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import {
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useParams,
+} from 'react-router-dom'
 import { cn } from '@/lib/utils'
-import { ProvidersPage } from '@/pages/ProvidersPage'
-import { ProjectWorkspacePage } from '@/pages/ProjectWorkspacePage'
+import { CodePage } from '@/pages/CodePage'
 import { ToolPage } from '@/pages/ToolPage'
+import Providers from '@/pages/Providers'
 import { ThemeTogglerButton } from '@animate-ui/components-buttons-theme-toggler'
 import { Settings } from 'lucide-react'
 
@@ -56,6 +63,12 @@ function NavIconLink({
   )
 }
 
+function LegacyProjectRouteRedirect() {
+  const { id } = useParams()
+  if (!id) return <Navigate to="/code" replace />
+  return <Navigate to={`/code?projects=${encodeURIComponent(id)}`} replace />
+}
+
 export default function App() {
   return (
     <div className="h-screen overflow-hidden bg-background text-foreground">
@@ -63,14 +76,14 @@ export default function App() {
         <aside className="flex w-16 shrink-0 flex-col items-center border-r bg-card px-2 py-4">
           <nav className="flex flex-col items-center gap-2">
             <NavIconLink
-              to="/codex"
-              label="Codex"
-              icon={<MaskIcon src="/code.svg" />}
+              to="/code"
+              label="Code"
+              icon={<MaskIcon src="/icon/code.svg" />}
             />
             <NavIconLink
               to="/claude"
               label="Claude Code"
-              icon={<MaskIcon src="/claude-code.svg" />}
+              icon={<MaskIcon src="/icon/claude-code.svg" />}
             />
             <NavIconLink
               to="/providers"
@@ -91,12 +104,13 @@ export default function App() {
 
         <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6">
           <Routes>
-            <Route path="/" element={<Navigate to="/codex" replace />} />
+            <Route path="/" element={<Navigate to="/code" replace />} />
+            <Route path="/code" element={<CodePage />} />
             <Route path="/codex" element={<ToolPage tool="codex" title="Codex" />} />
             <Route path="/claude" element={<ToolPage tool="claude" title="Claude Code" />} />
-            <Route path="/providers" element={<ProvidersPage />} />
-            <Route path="/projects/:id" element={<ProjectWorkspacePage />} />
-            <Route path="*" element={<Navigate to="/codex" replace />} />
+            <Route path="/providers" element={<Providers />} />
+            <Route path="/projects/:id" element={<LegacyProjectRouteRedirect />} />
+            <Route path="*" element={<Navigate to="/code" replace />} />
           </Routes>
         </main>
       </div>

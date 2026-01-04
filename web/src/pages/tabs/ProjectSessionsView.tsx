@@ -85,6 +85,8 @@ export function ProjectSessionsView({
   project: ProjectDto
   onBack: () => void
 }) {
+  const toolLabel = project.toolType === 'Codex' ? 'Codex' : 'Claude Code'
+
   const [sessions, setSessions] = useState<ProjectSessionDto[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -224,7 +226,7 @@ export function ProjectSessionsView({
             {loading ? <Spinner /> : null}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            扫描本机 Codex sessions 并按创建时间排序。
+            扫描本机 {toolLabel} sessions 并按创建时间排序。
           </div>
         </div>
         <Button

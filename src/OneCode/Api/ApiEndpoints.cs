@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using OneCode.Contracts.FileSystem;
+using OneCode.Contracts.Git;
 using OneCode.Contracts.Jobs;
 using OneCode.Contracts.Projects;
 using OneCode.Contracts.Providers;
@@ -28,8 +29,383 @@ public static class ApiEndpoints
         MapTools(api);
         MapJobs(api);
         MapFileSystem(api);
+        MapGit(api);
         MapProviders(api);
         MapProjects(api);
+    }
+
+    private static void MapGit(RouteGroupBuilder api)
+    {
+        var git = api.MapGroup("/git");
+
+        git.MapGet("/status", async (string path, CancellationToken cancellationToken) =>
+        {
+            var repoRoot = await ResolveGitRootAsync(path, cancellationToken);
+            var branch = await TryGetGitBranchAsync(repoRoot, cancellationToken);
+            var output = await RunGitAsync(repoRoot, ["status", "--porcelain"], cancellationToken);
+
+            var entries = new List<GitStatusEntryDto>();
+            foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Length < 3)
+                {
+                    continue;
+                }
+
+                var indexStatus = line[0].ToString();
+                var worktreeStatus = line[1].ToString();
+                var rest = line[2..].Trim();
+
+                string? originalPath = null;
+                var filePath = rest;
+
+                var arrowIndex = rest.IndexOf(" -> ", StringComparison.Ordinal);
+                if (arrowIndex > 0)
+                {
+                    originalPath = rest[..arrowIndex];
+                    filePath = rest[(arrowIndex + 4)..];
+                }
+
+                entries.Add(new GitStatusEntryDto(
+                    Path: filePath,
+                    IndexStatus: indexStatus,
+                    WorktreeStatus: worktreeStatus,
+                    OriginalPath: originalPath));
+            }
+
+            return new GitStatusResponse(
+                RepoRoot: repoRoot,
+                Branch: branch,
+                Entries: entries);
+        });
+
+        git.MapGet("/log", async (
+            string path,
+            CancellationToken cancellationToken,
+            int maxCount = 200) =>
+        {
+            var repoRoot = await ResolveGitRootAsync(path, cancellationToken);
+            var branch = await TryGetGitBranchAsync(repoRoot, cancellationToken);
+
+            var normalizedMax = Math.Clamp(maxCount, 1, 500);
+
+            var output = await TryRunGitAsync(
+                repoRoot,
+                ["log", "--graph", "--decorate", "--oneline", "--all", "--no-color", "--max-count", normalizedMax.ToString()],
+                cancellationToken);
+
+            var lines = string.IsNullOrWhiteSpace(output)
+                ? Array.Empty<string>()
+                : output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            return new GitLogResponse(
+                RepoRoot: repoRoot,
+                Branch: branch,
+                Lines: lines);
+        });
+
+        git.MapGet("/diff", async (string path, string file, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(file))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: file");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(path, cancellationToken);
+            var relative = file.Trim();
+
+            var truncated = false;
+
+            var tracked = await IsTrackedFileAsync(repoRoot, relative, cancellationToken);
+            string diff;
+
+            if (!tracked)
+            {
+                diff = BuildUntrackedDiff(repoRoot, relative, out truncated);
+            }
+            else
+            {
+                diff = await TryRunGitAsync(repoRoot, ["diff", "--no-color", "HEAD", "--", relative], cancellationToken)
+                    ?? await TryRunGitAsync(repoRoot, ["diff", "--no-color", "--", relative], cancellationToken)
+                    ?? string.Empty;
+
+                diff = diff.TrimEnd();
+                if (diff.Length > 400_000)
+                {
+                    truncated = true;
+                    diff = diff[..400_000] + "\n…(truncated)…";
+                }
+            }
+
+            return new GitDiffResponse(
+                File: relative,
+                Diff: diff,
+                Truncated: truncated);
+        });
+
+        git.MapPost("/commit", async ([FromBody] GitCommitRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.Message))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Message is required.");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
+            await RunGitAsync(repoRoot, ["add", "-A"], cancellationToken);
+
+            var message = request.Message.Trim();
+            await RunGitAsync(repoRoot, ["commit", "-m", message], cancellationToken);
+
+            var hash = (await RunGitAsync(repoRoot, ["rev-parse", "HEAD"], cancellationToken)).Trim();
+            var subject = (await RunGitAsync(repoRoot, ["log", "-1", "--pretty=%s"], cancellationToken)).Trim();
+
+            return new GitCommitResponse(Hash: hash, Subject: subject);
+        });
+    }
+
+    private static async Task<string> ResolveGitRootAsync(string path, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+        }
+
+        var normalizedPath = path.Trim();
+        if (!Directory.Exists(normalizedPath))
+        {
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "Directory does not exist.");
+        }
+
+        var root = (await TryRunGitAsync(
+            normalizedPath,
+            ["rev-parse", "--show-toplevel"],
+            cancellationToken))?.Trim();
+
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "Not a git repository.");
+        }
+
+        return root;
+    }
+
+    private static async Task<string?> TryGetGitBranchAsync(string repoRoot, CancellationToken cancellationToken)
+    {
+        var branch = await TryRunGitAsync(
+            repoRoot,
+            ["symbolic-ref", "--short", "HEAD"],
+            cancellationToken);
+
+        return string.IsNullOrWhiteSpace(branch) ? null : branch.Trim();
+    }
+
+    private static async Task<bool> IsTrackedFileAsync(
+        string repoRoot,
+        string relativePath,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunProcessAsync(
+            fileName: "git",
+            workingDirectory: repoRoot,
+            arguments: ["ls-files", "--error-unmatch", "--", relativePath],
+            cancellationToken);
+
+        return result.ExitCode == 0;
+    }
+
+    private static string BuildUntrackedDiff(string repoRoot, string relativePath, out bool truncated)
+    {
+        truncated = false;
+        var absolute = Path.Combine(repoRoot, relativePath);
+        if (!File.Exists(absolute))
+        {
+            return string.Empty;
+        }
+
+        const int maxBytes = 200_000;
+
+        byte[] buffer;
+        long sizeBytes;
+        try
+        {
+            var fileInfo = new FileInfo(absolute);
+            sizeBytes = fileInfo.Length;
+            var readSize = (int)Math.Min(maxBytes, Math.Max(0, sizeBytes));
+            buffer = readSize == 0 ? Array.Empty<byte>() : new byte[readSize];
+
+            if (buffer.Length > 0)
+            {
+                using var stream = new FileStream(
+                    absolute,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite);
+
+                var offset = 0;
+                while (offset < buffer.Length)
+                {
+                    var read = stream.Read(buffer, offset, buffer.Length - offset);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    offset += read;
+                }
+
+                if (offset != buffer.Length)
+                {
+                    buffer = buffer[..offset];
+                }
+            }
+        }
+        catch
+        {
+            return string.Empty;
+        }
+
+        truncated = sizeBytes > maxBytes;
+
+        static bool LooksBinary(ReadOnlySpan<byte> bytes)
+        {
+            if (bytes.Length == 0)
+            {
+                return false;
+            }
+
+            var suspicious = 0;
+            foreach (var b in bytes)
+            {
+                if (b == 0)
+                {
+                    return true;
+                }
+
+                if (b < 0x09 || (b > 0x0D && b < 0x20))
+                {
+                    suspicious++;
+                }
+            }
+
+            return suspicious > bytes.Length / 10;
+        }
+
+        if (LooksBinary(buffer))
+        {
+            return $"diff --git a/{relativePath} b/{relativePath}\nnew file mode 100644\nBinary files /dev/null and b/{relativePath} differ";
+        }
+
+        var content = Encoding.UTF8.GetString(buffer);
+        var sb = new StringBuilder();
+        sb.AppendLine($"diff --git a/{relativePath} b/{relativePath}");
+        sb.AppendLine("new file mode 100644");
+        sb.AppendLine("index 0000000..e69de29");
+        sb.AppendLine("--- /dev/null");
+        sb.AppendLine($"+++ b/{relativePath}");
+        sb.AppendLine("@@ -0,0 +1 @@");
+
+        foreach (var line in content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            sb.Append('+');
+            sb.AppendLine(line);
+        }
+
+        if (truncated)
+        {
+            sb.AppendLine("+…(truncated)…");
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static async Task<string> RunGitAsync(
+        string repoRoot,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunProcessAsync(
+            fileName: "git",
+            workingDirectory: repoRoot,
+            arguments: arguments,
+            cancellationToken);
+
+        if (result.ExitCode == 0)
+        {
+            return result.Stdout.TrimEnd();
+        }
+
+        var msg = string.IsNullOrWhiteSpace(result.Stderr)
+            ? result.Stdout
+            : result.Stderr;
+
+        msg = string.IsNullOrWhiteSpace(msg) ? "Git command failed." : msg.Trim();
+        throw new ApiHttpException(StatusCodes.Status400BadRequest, msg);
+    }
+
+    private static async Task<string?> TryRunGitAsync(
+        string repoRoot,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunProcessAsync(
+            fileName: "git",
+            workingDirectory: repoRoot,
+            arguments: arguments,
+            cancellationToken);
+
+        if (result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        return result.Stdout.TrimEnd();
+    }
+
+    private static async Task<(int ExitCode, string Stdout, string Stderr)> RunProcessAsync(
+        string fileName,
+        string workingDirectory,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
+
+            foreach (var arg in arguments)
+            {
+                process.StartInfo.ArgumentList.Add(arg);
+            }
+
+            process.Start();
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            return (process.ExitCode, stdout, stderr);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            throw new ApiHttpException(StatusCodes.Status500InternalServerError, "Failed to run git.");
+        }
     }
 
     private static void MapTools(RouteGroupBuilder api)
@@ -94,6 +470,24 @@ public static class ApiEndpoints
         {
             var normalizedDays = Math.Clamp(days, 1, 30);
             return await GetCodexDailyTokenUsageAsync(cache, forceRefresh, normalizedDays, cancellationToken);
+        });
+
+        tools.MapGet("/claude/token-usage", async (
+            IMemoryCache cache,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false) =>
+        {
+            return await GetClaudeTotalTokenUsageAsync(cache, forceRefresh, cancellationToken);
+        });
+
+        tools.MapGet("/claude/token-usage/daily", async (
+            IMemoryCache cache,
+            CancellationToken cancellationToken,
+            int days = 7,
+            bool forceRefresh = false) =>
+        {
+            var normalizedDays = Math.Clamp(days, 1, 30);
+            return await GetClaudeDailyTokenUsageAsync(cache, forceRefresh, normalizedDays, cancellationToken);
         });
     }
 
@@ -213,6 +607,125 @@ public static class ApiEndpoints
             }
 
             return new ListEntriesResponse(directoryInfo.FullName, parent, directories, files);
+        });
+
+        fs.MapGet("/has-git", async (string path, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+            }
+
+            var normalizedPath = path.Trim();
+            if (!Directory.Exists(normalizedPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Directory does not exist.");
+            }
+
+            try
+            {
+                _ = await ResolveGitRootAsync(normalizedPath, cancellationToken);
+                return true;
+            }
+            catch
+            {
+                // Fall back to a cheap .git check for non-git environments.
+            }
+
+            var candidate = Path.Combine(normalizedPath, ".git");
+            return Directory.Exists(candidate) || File.Exists(candidate);
+        });
+
+        fs.MapGet("/file", (string path) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Missing query parameter: path");
+            }
+
+            var normalizedPath = path.Trim();
+            if (!File.Exists(normalizedPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Entry not found.");
+            }
+
+            const int maxBytes = 200_000;
+
+            try
+            {
+                var fileInfo = new FileInfo(normalizedPath);
+                var sizeBytes = fileInfo.Length;
+                var readSize = (int)Math.Min(maxBytes, Math.Max(0, sizeBytes));
+                var buffer = readSize == 0 ? Array.Empty<byte>() : new byte[readSize];
+
+                if (buffer.Length > 0)
+                {
+                    using var stream = new FileStream(
+                        normalizedPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite);
+
+                    var offset = 0;
+                    while (offset < buffer.Length)
+                    {
+                        var read = stream.Read(buffer, offset, buffer.Length - offset);
+                        if (read <= 0)
+                        {
+                            break;
+                        }
+
+                        offset += read;
+                    }
+
+                    if (offset != buffer.Length)
+                    {
+                        buffer = buffer[..offset];
+                    }
+                }
+
+                static bool LooksBinary(ReadOnlySpan<byte> bytes)
+                {
+                    if (bytes.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    var suspicious = 0;
+                    foreach (var b in bytes)
+                    {
+                        if (b == 0)
+                        {
+                            return true;
+                        }
+
+                        if (b < 0x09 || (b > 0x0D && b < 0x20))
+                        {
+                            suspicious++;
+                        }
+                    }
+
+                    return suspicious > bytes.Length / 10;
+                }
+
+                var isBinary = LooksBinary(buffer);
+                var content = isBinary ? string.Empty : Encoding.UTF8.GetString(buffer);
+
+                return new ReadFileResponse(
+                    Path: normalizedPath,
+                    Content: content,
+                    Truncated: sizeBytes > maxBytes,
+                    IsBinary: isBinary,
+                    SizeBytes: sizeBytes);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+            }
+            catch (Exception ex) when (ex is IOException or NotSupportedException)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to read file.");
+            }
         });
 
         fs.MapDelete("/entry", (string path) =>
@@ -833,43 +1346,96 @@ public static class ApiEndpoints
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Project not found.");
             }
 
-            if (project.ToolType != ToolType.Codex)
+            if (project.ToolType == ToolType.Codex)
             {
-                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Only Codex sessions are supported.");
-            }
-
-            var sessionsRoot = Path.Combine(GetCodexHomePath(), "sessions");
-            if (!Directory.Exists(sessionsRoot))
-            {
-                return Array.Empty<ProjectSessionDto>();
-            }
-
-            var results = new List<ProjectSessionDto>();
-            foreach (var filePath in Directory.EnumerateFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var meta = await TryReadCodexSessionMetaAsync(filePath, cancellationToken);
-                if (meta is null)
+                var sessionsRoot = Path.Combine(GetCodexHomePath(), "sessions");
+                if (!Directory.Exists(sessionsRoot))
                 {
-                    continue;
+                    return Array.Empty<ProjectSessionDto>();
                 }
 
-                if (!IsSameOrDescendantPath(project.WorkspacePath, meta.Cwd))
+                var results = new List<ProjectSessionDto>();
+                foreach (var filePath in Directory.EnumerateFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories))
                 {
-                    continue;
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var meta = await TryReadCodexSessionMetaAsync(filePath, cancellationToken);
+                    if (meta is null)
+                    {
+                        continue;
+                    }
+
+                    if (!IsSameOrDescendantPath(project.WorkspacePath, meta.Cwd))
+                    {
+                        continue;
+                    }
+
+                    var session = await TryBuildCodexSessionSummaryAsync(filePath, meta, cancellationToken);
+                    if (session is not null)
+                    {
+                        results.Add(session);
+                    }
                 }
 
-                var session = await TryBuildCodexSessionSummaryAsync(filePath, meta, cancellationToken);
-                if (session is not null)
-                {
-                    results.Add(session);
-                }
+                return results
+                    .OrderByDescending(x => x.CreatedAtUtc)
+                    .ToArray();
             }
 
-            return results
-                .OrderByDescending(x => x.CreatedAtUtc)
-                .ToArray();
+            if (project.ToolType == ToolType.ClaudeCode)
+            {
+                var claudeProjectsRoot = GetClaudeProjectsPath();
+                if (!Directory.Exists(claudeProjectsRoot))
+                {
+                    return Array.Empty<ProjectSessionDto>();
+                }
+
+                var sessionsById = new Dictionary<string, (ClaudeSessionMeta Meta, List<string> Files)>(StringComparer.Ordinal);
+
+                foreach (var filePath in Directory.EnumerateFiles(claudeProjectsRoot, "*.jsonl", SearchOption.AllDirectories))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var meta = await TryReadClaudeSessionMetaAsync(filePath, cancellationToken);
+                    if (meta is null)
+                    {
+                        continue;
+                    }
+
+                    if (!IsSameOrDescendantPath(project.WorkspacePath, meta.Cwd))
+                    {
+                        continue;
+                    }
+
+                    if (sessionsById.TryGetValue(meta.Id, out var existing))
+                    {
+                        existing.Files.Add(filePath);
+                        var bestMeta = existing.Meta.CreatedAtUtc <= meta.CreatedAtUtc ? existing.Meta : meta;
+                        sessionsById[meta.Id] = (bestMeta, existing.Files);
+                        continue;
+                    }
+
+                    sessionsById[meta.Id] = (meta, new List<string> { filePath });
+                }
+
+                var results = new List<ProjectSessionDto>();
+                foreach (var entry in sessionsById.Values)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var session = await TryBuildClaudeSessionSummaryAsync(entry.Files, entry.Meta, cancellationToken);
+                    if (session is not null)
+                    {
+                        results.Add(session);
+                    }
+                }
+
+                return results
+                    .OrderByDescending(x => x.CreatedAtUtc)
+                    .ToArray();
+            }
+
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "Only Codex and Claude Code sessions are supported.");
         });
 
         projects.MapGet("/scan-codex-sessions", async (
@@ -934,9 +1500,330 @@ public static class ApiEndpoints
                 await TrySendAsync("done", JsonSerializer.Serialize(payload));
             }
 
+            if (toolType == ToolType.ClaudeCode)
+            {
+                var projectsRoot = GetClaudeProjectsPath();
+                if (!await LogAsync($"开始扫描：{projectsRoot}"))
+                {
+                    return Results.Empty;
+                }
+
+                if (!Directory.Exists(projectsRoot))
+                {
+                    await LogAsync("Claude projects 目录不存在，未执行扫描。");
+                    await SendDoneAsync(new
+                    {
+                        scannedFiles = 0,
+                        uniqueCwds = 0,
+                        created = 0,
+                        skippedExisting = 0,
+                        skippedMissingWorkspace = 0,
+                        readErrors = 0,
+                        jsonErrors = 0,
+                    });
+                    return Results.Empty;
+                }
+
+                string[] projectDirs;
+                try
+                {
+                    projectDirs = Directory.EnumerateDirectories(projectsRoot).ToArray();
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    await LogAsync($"读取 Claude projects 目录失败：{ex.Message}");
+                    await SendDoneAsync(new
+                    {
+                        scannedFiles = 0,
+                        uniqueCwds = 0,
+                        created = 0,
+                        skippedExisting = 0,
+                        skippedMissingWorkspace = 0,
+                        readErrors = 0,
+                        jsonErrors = 0,
+                    });
+                    return Results.Empty;
+                }
+
+                await LogAsync($"发现 Claude projects 目录：{projectDirs.Length}");
+
+                var claudeUniqueCwds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var claudeReadErrors = 0;
+                var claudeJsonErrors = 0;
+
+                for (var i = 0; i < projectDirs.Length; i++)
+                {
+                    if (!connected || cancellationToken.IsCancellationRequested)
+                    {
+                        return Results.Empty;
+                    }
+
+                    var dir = projectDirs[i];
+                    var dirName = Path.GetFileName(dir);
+                    if (string.IsNullOrWhiteSpace(dirName))
+                    {
+                        continue;
+                    }
+
+                    string? cwd = null;
+                    try
+                    {
+                        foreach (var filePath in Directory.EnumerateFiles(dir, "*.jsonl", SearchOption.TopDirectoryOnly))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            string? firstLine;
+                            try
+                            {
+                                await using var stream = File.OpenRead(filePath);
+                                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                                firstLine = await reader.ReadLineAsync(cancellationToken);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                return Results.Empty;
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                                claudeReadErrors++;
+                                if (claudeReadErrors <= 10)
+                                {
+                                    await LogAsync($"读取失败：{filePath}（{ex.Message}）");
+                                }
+
+                                continue;
+                            }
+
+                            if (string.IsNullOrWhiteSpace(firstLine))
+                            {
+                                continue;
+                            }
+
+                            firstLine = firstLine.Trim().TrimStart('\uFEFF');
+
+                            try
+                            {
+                                using var doc = JsonDocument.Parse(firstLine);
+                                if (doc.RootElement.TryGetProperty("cwd", out var cwdProp)
+                                    && cwdProp.ValueKind == JsonValueKind.String)
+                                {
+                                    cwd = cwdProp.GetString();
+                                }
+                            }
+                            catch (JsonException)
+                            {
+                                claudeJsonErrors++;
+                                if (claudeJsonErrors <= 10)
+                                {
+                                    await LogAsync($"JSON 解析失败：{filePath}");
+                                }
+
+                                continue;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(cwd))
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        claudeReadErrors++;
+                        if (claudeReadErrors <= 10)
+                        {
+                            await LogAsync($"读取 Claude 项目目录失败：{dir}（{ex.Message}）");
+                        }
+                    }
+
+                    string workspacePath;
+                    if (!string.IsNullOrWhiteSpace(cwd))
+                    {
+                        workspacePath = cwd!;
+                    }
+                    else if (!TryDecodeClaudeProjectDirectoryName(dirName, out workspacePath))
+                    {
+                        claudeJsonErrors++;
+                        if (claudeJsonErrors <= 10)
+                        {
+                            await LogAsync($"Claude projects 目录无法解析，跳过：{dirName}");
+                        }
+
+                        continue;
+                    }
+
+                    var trimmed = workspacePath.Trim();
+                    if (trimmed.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (claudeUniqueCwds.Add(trimmed) && claudeUniqueCwds.Count <= 30)
+                    {
+                        await LogAsync($"发现项目 cwd：{trimmed}");
+                    }
+
+                    if ((i + 1) % 1000 == 0)
+                    {
+                        await LogAsync($"扫描进度：{i + 1}/{projectDirs.Length}，已发现 cwd：{claudeUniqueCwds.Count}");
+                    }
+                }
+
+                if (claudeUniqueCwds.Count > 30)
+                {
+                    await LogAsync($"发现 cwd 数：{claudeUniqueCwds.Count}（后续仅展示创建/跳过日志）");
+                }
+
+                var claudeExistingProjects = await db.Projects
+                    .Where(x => x.ToolType == toolType)
+                    .Select(x => new { x.Name, x.WorkspacePath })
+                    .ToListAsync(cancellationToken);
+
+                var claudeExistingNameSet = new HashSet<string>(
+                    claudeExistingProjects.Select(x => x.Name),
+                    StringComparer.OrdinalIgnoreCase);
+                var claudeExistingWorkspaceSet = new HashSet<string>(
+                    claudeExistingProjects.Select(x => x.WorkspacePath),
+                    StringComparer.OrdinalIgnoreCase);
+
+                var claudeWorkspaceToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var project in claudeExistingProjects)
+                {
+                    if (!claudeWorkspaceToName.ContainsKey(project.WorkspacePath))
+                    {
+                        claudeWorkspaceToName[project.WorkspacePath] = project.Name;
+                    }
+                }
+
+                var claudeCreated = 0;
+                var claudeSkippedExisting = 0;
+                var claudeSkippedMissingWorkspace = 0;
+                var claudeLoggedExistingSkips = 0;
+                var claudeLoggedMissingSkips = 0;
+                var claudeLoggedNameConflicts = 0;
+
+                await LogAsync("开始创建项目…");
+
+                foreach (var cwd in claudeUniqueCwds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!connected || cancellationToken.IsCancellationRequested)
+                    {
+                        return Results.Empty;
+                    }
+
+                    var workspacePath = cwd.Trim();
+                    if (!Directory.Exists(workspacePath))
+                    {
+                        claudeSkippedMissingWorkspace++;
+                        if (claudeLoggedMissingSkips < 20)
+                        {
+                            claudeLoggedMissingSkips++;
+                            await LogAsync($"目录不存在，跳过：{workspacePath}");
+                        }
+
+                        continue;
+                    }
+
+                    if (claudeExistingWorkspaceSet.Contains(workspacePath))
+                    {
+                        claudeSkippedExisting++;
+                        if (claudeLoggedExistingSkips < 20)
+                        {
+                            claudeLoggedExistingSkips++;
+                            if (claudeWorkspaceToName.TryGetValue(workspacePath, out var existingName))
+                            {
+                                await LogAsync($"工作空间已存在，跳过：{workspacePath}（{existingName}）");
+                            }
+                            else
+                            {
+                                await LogAsync($"工作空间已存在，跳过：{workspacePath}");
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    var name = BuildProjectNameFromCwd(workspacePath);
+                    var uniqueName = EnsureUniqueProjectName(name, workspacePath, claudeExistingNameSet);
+                    if (!string.Equals(uniqueName, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (claudeLoggedNameConflicts < 20)
+                        {
+                            claudeLoggedNameConflicts++;
+                            await LogAsync($"项目名冲突，已自动追加后缀：{name} -> {uniqueName}");
+                        }
+
+                        name = uniqueName;
+                    }
+
+                    if (claudeExistingNameSet.Contains(name))
+                    {
+                        claudeSkippedExisting++;
+                        if (claudeLoggedExistingSkips < 20)
+                        {
+                            claudeLoggedExistingSkips++;
+                            await LogAsync($"已存在，跳过：{name}");
+                        }
+
+                        continue;
+                    }
+
+                    var entity = new ProjectEntity
+                    {
+                        Id = Guid.NewGuid(),
+                        ToolType = toolType,
+                        Name = name,
+                        WorkspacePath = workspacePath,
+                        ProviderId = null,
+                        Model = null,
+                        CreatedAtUtc = DateTimeOffset.UtcNow,
+                        UpdatedAtUtc = DateTimeOffset.UtcNow,
+                    };
+
+                    db.Projects.Add(entity);
+                    try
+                    {
+                        await db.SaveChangesAsync(cancellationToken);
+                        claudeCreated++;
+                        claudeExistingNameSet.Add(name);
+                        claudeExistingWorkspaceSet.Add(workspacePath);
+                        claudeWorkspaceToName[workspacePath] = name;
+                        await LogAsync($"已创建：{name}");
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return Results.Empty;
+                    }
+                    catch (DbUpdateException)
+                    {
+                        db.Entry(entity).State = EntityState.Detached;
+                        claudeSkippedExisting++;
+                        if (claudeLoggedExistingSkips < 20)
+                        {
+                            claudeLoggedExistingSkips++;
+                            await LogAsync($"创建冲突，跳过：{name}");
+                        }
+                    }
+                }
+
+                await LogAsync($"完成：创建 {claudeCreated}，跳过已存在 {claudeSkippedExisting}，跳过不存在目录 {claudeSkippedMissingWorkspace}。");
+                await SendDoneAsync(new
+                {
+                    scannedFiles = projectDirs.Length,
+                    uniqueCwds = claudeUniqueCwds.Count,
+                    created = claudeCreated,
+                    skippedExisting = claudeSkippedExisting,
+                    skippedMissingWorkspace = claudeSkippedMissingWorkspace,
+                    readErrors = claudeReadErrors,
+                    jsonErrors = claudeJsonErrors,
+                });
+
+                return Results.Empty;
+            }
+
             if (toolType != ToolType.Codex)
             {
-                await LogAsync("当前仅支持从 Codex sessions 扫描项目。");
+                await LogAsync("当前仅支持从 Codex / Claude sessions 扫描项目。");
                 await SendDoneAsync(new
                 {
                     scannedFiles = 0,
@@ -1241,6 +2128,11 @@ public static class ApiEndpoints
         string Cwd,
         DateTimeOffset CreatedAtUtc);
 
+    private sealed record ClaudeSessionMeta(
+        string Id,
+        string Cwd,
+        DateTimeOffset CreatedAtUtc);
+
     private enum CodexSessionEventKind
     {
         Message = 0,
@@ -1266,6 +2158,12 @@ public static class ApiEndpoints
     private static string GetCodexDailyTokenUsageCacheKey(int days) =>
         $"codex:token-usage:daily:{days}:v1";
     private static readonly SemaphoreSlim CodexDailyTokenUsageLock = new(1, 1);
+
+    private const string ClaudeTotalTokenUsageCacheKey = "claude:token-usage:total:v1";
+    private static readonly SemaphoreSlim ClaudeTotalTokenUsageLock = new(1, 1);
+    private static string GetClaudeDailyTokenUsageCacheKey(int days) =>
+        $"claude:token-usage:daily:{days}:v1";
+    private static readonly SemaphoreSlim ClaudeDailyTokenUsageLock = new(1, 1);
 
     private static async Task<SessionTokenUsageDto> GetCodexTotalTokenUsageAsync(
         IMemoryCache cache,
@@ -1305,6 +2203,44 @@ public static class ApiEndpoints
         }
     }
 
+    private static async Task<SessionTokenUsageDto> GetClaudeTotalTokenUsageAsync(
+        IMemoryCache cache,
+        bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        if (!forceRefresh
+            && cache.TryGetValue(ClaudeTotalTokenUsageCacheKey, out SessionTokenUsageDto? cached)
+            && cached is not null)
+        {
+            return cached;
+        }
+
+        await ClaudeTotalTokenUsageLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!forceRefresh
+                && cache.TryGetValue(ClaudeTotalTokenUsageCacheKey, out cached)
+                && cached is not null)
+            {
+                return cached;
+            }
+
+            var computed = await ComputeClaudeTotalTokenUsageAsync(cancellationToken);
+            cache.Set(
+                ClaudeTotalTokenUsageCacheKey,
+                computed,
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2),
+                });
+            return computed;
+        }
+        finally
+        {
+            ClaudeTotalTokenUsageLock.Release();
+        }
+    }
+
     private static async Task<SessionTokenUsageDto> ComputeCodexTotalTokenUsageAsync(
         CancellationToken cancellationToken)
     {
@@ -1335,6 +2271,50 @@ public static class ApiEndpoints
             cancellationToken.ThrowIfCancellationRequested();
 
             var usage = await TryReadCodexSessionTokenUsageAsync(filePath, cancellationToken);
+            if (usage is null || usage.TotalTokens <= 0)
+            {
+                continue;
+            }
+
+            inputTokens += usage.InputTokens;
+            cachedInputTokens += usage.CachedInputTokens;
+            outputTokens += usage.OutputTokens;
+            reasoningOutputTokens += usage.ReasoningOutputTokens;
+        }
+
+        return new SessionTokenUsageDto(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+    }
+
+    private static async Task<SessionTokenUsageDto> ComputeClaudeTotalTokenUsageAsync(
+        CancellationToken cancellationToken)
+    {
+        var projectsRoot = GetClaudeProjectsPath();
+        if (!Directory.Exists(projectsRoot))
+        {
+            return new SessionTokenUsageDto(0, 0, 0, 0);
+        }
+
+        string[] jsonlFiles;
+        try
+        {
+            jsonlFiles = Directory.EnumerateFiles(projectsRoot, "*.jsonl", SearchOption.AllDirectories)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            return new SessionTokenUsageDto(0, 0, 0, 0);
+        }
+
+        var inputTokens = 0L;
+        var cachedInputTokens = 0L;
+        var outputTokens = 0L;
+        var reasoningOutputTokens = 0L;
+
+        foreach (var filePath in jsonlFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var usage = await TryReadClaudeSessionTokenUsageAsync(filePath, cancellationToken);
             if (usage is null || usage.TotalTokens <= 0)
             {
                 continue;
@@ -1388,6 +2368,48 @@ public static class ApiEndpoints
         finally
         {
             CodexDailyTokenUsageLock.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<CodexDailyTokenUsageDto>> GetClaudeDailyTokenUsageAsync(
+        IMemoryCache cache,
+        bool forceRefresh,
+        int days,
+        CancellationToken cancellationToken)
+    {
+        days = Math.Clamp(days, 1, 30);
+        var cacheKey = GetClaudeDailyTokenUsageCacheKey(days);
+
+        if (!forceRefresh
+            && cache.TryGetValue(cacheKey, out IReadOnlyList<CodexDailyTokenUsageDto>? cached)
+            && cached is not null)
+        {
+            return cached;
+        }
+
+        await ClaudeDailyTokenUsageLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!forceRefresh
+                && cache.TryGetValue(cacheKey, out cached)
+                && cached is not null)
+            {
+                return cached;
+            }
+
+            var computed = await ComputeClaudeDailyTokenUsageAsync(days, cancellationToken);
+            cache.Set(
+                cacheKey,
+                computed,
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2),
+                });
+            return computed;
+        }
+        finally
+        {
+            ClaudeDailyTokenUsageLock.Release();
         }
     }
 
@@ -1458,6 +2480,73 @@ public static class ApiEndpoints
         return items;
     }
 
+    private static async Task<IReadOnlyList<CodexDailyTokenUsageDto>> ComputeClaudeDailyTokenUsageAsync(
+        int days,
+        CancellationToken cancellationToken)
+    {
+        days = Math.Clamp(days, 1, 30);
+
+        var today = DateOnly.FromDateTime(DateTimeOffset.Now.ToLocalTime().DateTime);
+        var startDay = today.AddDays(-(days - 1));
+
+        var projectsRoot = GetClaudeProjectsPath();
+        if (!Directory.Exists(projectsRoot))
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        string[] jsonlFiles;
+        try
+        {
+            jsonlFiles = Directory.EnumerateFiles(projectsRoot, "*.jsonl", SearchOption.AllDirectories)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        if (jsonlFiles.Length == 0)
+        {
+            return BuildEmptyCodexDailyTokenUsage(days, startDay);
+        }
+
+        var inputTokens = new long[days];
+        var cachedInputTokens = new long[days];
+        var outputTokens = new long[days];
+        var reasoningOutputTokens = new long[days];
+
+        foreach (var filePath in jsonlFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await AccumulateClaudeDailyTokenUsageFromSessionAsync(
+                filePath,
+                startDay,
+                today,
+                inputTokens,
+                cachedInputTokens,
+                outputTokens,
+                reasoningOutputTokens,
+                cancellationToken);
+        }
+
+        var items = new List<CodexDailyTokenUsageDto>(days);
+        for (var i = 0; i < days; i++)
+        {
+            var day = startDay.AddDays(i);
+            items.Add(new CodexDailyTokenUsageDto(
+                Date: day.ToString("yyyy-MM-dd"),
+                TokenUsage: new SessionTokenUsageDto(
+                    inputTokens[i],
+                    cachedInputTokens[i],
+                    outputTokens[i],
+                    reasoningOutputTokens[i])));
+        }
+
+        return items;
+    }
+
     private static IReadOnlyList<CodexDailyTokenUsageDto> BuildEmptyCodexDailyTokenUsage(
         int days,
         DateOnly startDay)
@@ -1472,6 +2561,80 @@ public static class ApiEndpoints
         }
 
         return items;
+    }
+
+    private static async Task AccumulateClaudeDailyTokenUsageFromSessionAsync(
+        string filePath,
+        DateOnly startDay,
+        DateOnly endDay,
+        long[] inputTokens,
+        long[] cachedInputTokens,
+        long[] outputTokens,
+        long[] reasoningOutputTokens,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var seenMessageIds = new HashSet<string>(StringComparer.Ordinal);
+
+            await using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+
+                if (!TryReadClaudeMessageUsage(root, out var timestamp, out var messageId, out var usage))
+                {
+                    continue;
+                }
+
+                if (!seenMessageIds.Add(messageId))
+                {
+                    continue;
+                }
+
+                if (usage.TotalTokens <= 0)
+                {
+                    continue;
+                }
+
+                var localDay = DateOnly.FromDateTime(timestamp.ToLocalTime().DateTime);
+                if (localDay < startDay || localDay > endDay)
+                {
+                    continue;
+                }
+
+                var idx = localDay.DayNumber - startDay.DayNumber;
+                if ((uint)idx >= (uint)inputTokens.Length)
+                {
+                    continue;
+                }
+
+                inputTokens[idx] += usage.InputTokens;
+                cachedInputTokens[idx] += usage.CachedInputTokens;
+                outputTokens[idx] += usage.OutputTokens;
+                reasoningOutputTokens[idx] += usage.ReasoningOutputTokens;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // ignore
+        }
     }
 
     private static async Task AccumulateCodexDailyTokenUsageFromSessionAsync(
@@ -1578,6 +2741,69 @@ public static class ApiEndpoints
         }
     }
 
+    private static async Task<CodexTokenUsageSnapshot?> TryReadClaudeSessionTokenUsageAsync(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var inputTokens = 0L;
+            var cachedInputTokens = 0L;
+            var outputTokens = 0L;
+            var reasoningOutputTokens = 0L;
+
+            var seenMessageIds = new HashSet<string>(StringComparer.Ordinal);
+
+            await using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+
+                if (!TryReadClaudeMessageUsage(root, out _, out var messageId, out var usage))
+                {
+                    continue;
+                }
+
+                if (!seenMessageIds.Add(messageId))
+                {
+                    continue;
+                }
+
+                if (usage.TotalTokens <= 0)
+                {
+                    continue;
+                }
+
+                inputTokens += usage.InputTokens;
+                cachedInputTokens += usage.CachedInputTokens;
+                outputTokens += usage.OutputTokens;
+                reasoningOutputTokens += usage.ReasoningOutputTokens;
+            }
+
+            return new CodexTokenUsageSnapshot(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
     private static async Task<CodexTokenUsageSnapshot?> TryReadCodexSessionTokenUsageAsync(
         string filePath,
         CancellationToken cancellationToken)
@@ -1661,6 +2887,86 @@ public static class ApiEndpoints
         }
     }
 
+    private static bool TryReadClaudeMessageUsage(
+        JsonElement root,
+        out DateTimeOffset timestamp,
+        out string messageId,
+        out CodexTokenUsageSnapshot usage)
+    {
+        timestamp = default;
+        messageId = string.Empty;
+        usage = new CodexTokenUsageSnapshot(0, 0, 0, 0);
+
+        if (!TryReadTimestamp(root, out timestamp))
+        {
+            return false;
+        }
+
+        if (!root.TryGetProperty("type", out var typeProp)
+            || typeProp.ValueKind != JsonValueKind.String
+            || !string.Equals(typeProp.GetString(), "assistant", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!root.TryGetProperty("message", out var message)
+            || message.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!message.TryGetProperty("id", out var idProp)
+            || idProp.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var id = idProp.GetString();
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        if (!message.TryGetProperty("usage", out var usageProp)
+            || usageProp.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        static long ReadLong(JsonElement obj, string name)
+        {
+            if (!obj.TryGetProperty(name, out var prop))
+            {
+                return 0;
+            }
+
+            if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var v))
+            {
+                return v;
+            }
+
+            if (prop.ValueKind == JsonValueKind.String && long.TryParse(prop.GetString(), out v))
+            {
+                return v;
+            }
+
+            return 0;
+        }
+
+        var inputTokens = ReadLong(usageProp, "input_tokens");
+        var cacheCreateTokens = ReadLong(usageProp, "cache_creation_input_tokens");
+        var cacheReadTokens = ReadLong(usageProp, "cache_read_input_tokens");
+        var outputTokens = ReadLong(usageProp, "output_tokens");
+
+        messageId = id;
+        usage = new CodexTokenUsageSnapshot(
+            InputTokens: inputTokens,
+            CachedInputTokens: cacheCreateTokens + cacheReadTokens,
+            OutputTokens: outputTokens,
+            ReasoningOutputTokens: 0);
+        return true;
+    }
+
     private static async Task<CodexSessionMeta?> TryReadCodexSessionMetaAsync(
         string filePath,
         CancellationToken cancellationToken)
@@ -1703,6 +3009,69 @@ public static class ApiEndpoints
             }
 
             return new CodexSessionMeta(id!, cwd!, createdAtUtc);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<ClaudeSessionMeta?> TryReadClaudeSessionMetaAsync(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DateTimeOffset? createdAtUtc = null;
+
+            await using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096);
+
+            for (var i = 0; i < 80; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+
+                if (createdAtUtc is null && TryReadTimestamp(root, out var timestamp))
+                {
+                    createdAtUtc = timestamp;
+                }
+
+                var sessionId = root.TryGetProperty("sessionId", out var sessionIdProp)
+                    && sessionIdProp.ValueKind == JsonValueKind.String
+                        ? sessionIdProp.GetString()
+                        : null;
+
+                var cwd = root.TryGetProperty("cwd", out var cwdProp)
+                    && cwdProp.ValueKind == JsonValueKind.String
+                        ? cwdProp.GetString()
+                        : null;
+
+                if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(cwd))
+                {
+                    continue;
+                }
+
+                return new ClaudeSessionMeta(
+                    Id: sessionId!,
+                    Cwd: cwd!,
+                    CreatedAtUtc: createdAtUtc ?? new DateTimeOffset(File.GetCreationTimeUtc(filePath), TimeSpan.Zero));
+            }
+
+            return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -1887,6 +3256,251 @@ public static class ApiEndpoints
                         otherCount++;
                         break;
                 }
+            }
+
+            startAt = minEventAt;
+
+            var duration = lastEventAt - startAt;
+            var durationMs = duration <= TimeSpan.Zero ? 0 : (long)duration.TotalMilliseconds;
+
+            var timeline = BuildTimeline(events, startAt, lastEventAt);
+            var trace = BuildTrace(
+                startAt,
+                lastEventAt,
+                userMessageTimes,
+                assistantMessageTimes,
+                toolIntervals,
+                tokenDeltas);
+            return new ProjectSessionDto(
+                Id: meta.Id,
+                CreatedAtUtc: startAt,
+                LastEventAtUtc: lastEventAt,
+                DurationMs: durationMs,
+                EventCounts: new SessionEventCountsDto(messageCount, functionCallCount, reasoningCount, tokenCount, otherCount),
+                TokenUsage: new SessionTokenUsageDto(inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens),
+                Timeline: timeline,
+                Trace: trace);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<ProjectSessionDto?> TryBuildClaudeSessionSummaryAsync(
+        IReadOnlyList<string> filePaths,
+        ClaudeSessionMeta meta,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var startAt = meta.CreatedAtUtc;
+            var minEventAt = startAt;
+            var lastEventAt = startAt;
+            var hasTimestamp = false;
+
+            var messageCount = 0;
+            var functionCallCount = 0;
+            var reasoningCount = 0;
+            var tokenCount = 0;
+            var otherCount = 0;
+
+            var inputTokens = 0L;
+            var cachedInputTokens = 0L;
+            var outputTokens = 0L;
+            var reasoningOutputTokens = 0L;
+
+            var events = new List<(DateTimeOffset Timestamp, CodexSessionEventKind Kind)>();
+            var userMessageTimes = new List<DateTimeOffset>();
+            var assistantMessageTimes = new List<DateTimeOffset>();
+            var assistantMessageIdSet = new HashSet<string>(StringComparer.Ordinal);
+
+            var toolStartByToolUseId = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            var toolEndByToolUseId = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            var toolIntervals = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+            var tokenDeltas = new List<(DateTimeOffset Timestamp, CodexTokenUsageSnapshot Delta)>();
+
+            foreach (var filePath in filePaths)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                await using var stream = File.OpenRead(filePath);
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var line = await reader.ReadLineAsync(cancellationToken);
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+
+                    if (!TryReadTimestamp(root, out var timestamp))
+                    {
+                        continue;
+                    }
+
+                    hasTimestamp = true;
+                    if (timestamp < minEventAt)
+                    {
+                        minEventAt = timestamp;
+                    }
+
+                    if (timestamp > lastEventAt)
+                    {
+                        lastEventAt = timestamp;
+                    }
+
+                    var type = root.TryGetProperty("type", out var typeProp) && typeProp.ValueKind == JsonValueKind.String
+                        ? typeProp.GetString()
+                        : null;
+
+                    if (string.Equals(type, "assistant", StringComparison.Ordinal))
+                    {
+                        if (root.TryGetProperty("message", out var message)
+                            && message.ValueKind == JsonValueKind.Object
+                            && message.TryGetProperty("content", out var content)
+                            && content.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in content.EnumerateArray())
+                            {
+                                if (item.ValueKind != JsonValueKind.Object)
+                                {
+                                    continue;
+                                }
+
+                                if (!item.TryGetProperty("type", out var itemTypeProp)
+                                    || itemTypeProp.ValueKind != JsonValueKind.String
+                                    || !string.Equals(itemTypeProp.GetString(), "tool_use", StringComparison.Ordinal))
+                                {
+                                    continue;
+                                }
+
+                                functionCallCount++;
+                                events.Add((timestamp, CodexSessionEventKind.FunctionCall));
+
+                                if (item.TryGetProperty("id", out var toolUseIdProp)
+                                    && toolUseIdProp.ValueKind == JsonValueKind.String)
+                                {
+                                    var toolUseId = toolUseIdProp.GetString();
+                                    if (!string.IsNullOrWhiteSpace(toolUseId))
+                                    {
+                                        if (toolEndByToolUseId.TryGetValue(toolUseId!, out var endAt)
+                                            && endAt > timestamp)
+                                        {
+                                            toolIntervals.Add((timestamp, endAt));
+                                            toolEndByToolUseId.Remove(toolUseId!);
+                                        }
+                                        else
+                                        {
+                                            toolStartByToolUseId[toolUseId!] = timestamp;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (TryReadClaudeMessageUsage(root, out _, out var messageId, out var usage)
+                            && assistantMessageIdSet.Add(messageId))
+                        {
+                            messageCount++;
+                            tokenCount++;
+                            assistantMessageTimes.Add(timestamp);
+                            events.Add((timestamp, CodexSessionEventKind.Message));
+                            events.Add((timestamp, CodexSessionEventKind.TokenCount));
+
+                            if (usage.TotalTokens > 0)
+                            {
+                                tokenDeltas.Add((timestamp, usage));
+                                inputTokens += usage.InputTokens;
+                                cachedInputTokens += usage.CachedInputTokens;
+                                outputTokens += usage.OutputTokens;
+                                reasoningOutputTokens += usage.ReasoningOutputTokens;
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    if (string.Equals(type, "user", StringComparison.Ordinal))
+                    {
+                        var isToolResult = false;
+
+                        if (root.TryGetProperty("message", out var message)
+                            && message.ValueKind == JsonValueKind.Object
+                            && message.TryGetProperty("content", out var content)
+                            && content.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in content.EnumerateArray())
+                            {
+                                if (item.ValueKind != JsonValueKind.Object)
+                                {
+                                    continue;
+                                }
+
+                                if (!item.TryGetProperty("type", out var itemTypeProp)
+                                    || itemTypeProp.ValueKind != JsonValueKind.String
+                                    || !string.Equals(itemTypeProp.GetString(), "tool_result", StringComparison.Ordinal))
+                                {
+                                    continue;
+                                }
+
+                                isToolResult = true;
+                                functionCallCount++;
+                                events.Add((timestamp, CodexSessionEventKind.FunctionCall));
+
+                                if (item.TryGetProperty("tool_use_id", out var toolUseIdProp)
+                                    && toolUseIdProp.ValueKind == JsonValueKind.String)
+                                {
+                                    var toolUseId = toolUseIdProp.GetString();
+                                    if (!string.IsNullOrWhiteSpace(toolUseId))
+                                    {
+                                        if (toolStartByToolUseId.TryGetValue(toolUseId!, out var toolStart))
+                                        {
+                                            if (timestamp > toolStart)
+                                            {
+                                                toolIntervals.Add((toolStart, timestamp));
+                                            }
+
+                                            toolStartByToolUseId.Remove(toolUseId!);
+                                        }
+                                        else
+                                        {
+                                            toolEndByToolUseId[toolUseId!] = timestamp;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!isToolResult)
+                        {
+                            messageCount++;
+                            userMessageTimes.Add(timestamp);
+                            events.Add((timestamp, CodexSessionEventKind.Message));
+                        }
+
+                        continue;
+                    }
+
+                    otherCount++;
+                    events.Add((timestamp, CodexSessionEventKind.Other));
+                }
+            }
+
+            if (!hasTimestamp)
+            {
+                return null;
             }
 
             startAt = minEventAt;
@@ -3043,6 +4657,48 @@ public static class ApiEndpoints
             : codexHome;
     }
 
+    private static bool TryDecodeClaudeProjectDirectoryName(
+        string directoryName,
+        out string workspacePath)
+    {
+        workspacePath = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(directoryName))
+        {
+            return false;
+        }
+
+        // Claude Code stores projects under ~/.claude/projects/<encoded-path>/...
+        // On Windows this looks like: c--code-RoutinAI
+        // Where:
+        //   "--" => ":\"
+        //   "-"  => "\"
+        var trimmed = directoryName.Trim();
+        var idx = trimmed.IndexOf("--", StringComparison.Ordinal);
+        if (idx <= 0)
+        {
+            return false;
+        }
+
+        var driveToken = trimmed[..idx];
+        if (driveToken.Length != 1 || !char.IsLetter(driveToken[0]))
+        {
+            return false;
+        }
+
+        var driveLetter = char.ToUpperInvariant(driveToken[0]);
+        var rest = trimmed[(idx + 2)..];
+
+        if (rest.Length == 0)
+        {
+            workspacePath = $"{driveLetter}:{Path.DirectorySeparatorChar}";
+            return true;
+        }
+
+        workspacePath = $"{driveLetter}:{Path.DirectorySeparatorChar}{rest.Replace('-', Path.DirectorySeparatorChar)}";
+        return true;
+    }
+
     private const int ProjectNameMaxLength = 200;
 
     private static string BuildProjectNameFromCwd(string cwd)
@@ -3148,14 +4804,23 @@ public static class ApiEndpoints
         return Path.Combine(GetCodexHomePath(), "config.toml");
     }
 
-    private static string GetClaudeSettingsPath()
+    private static string GetClaudeConfigDir()
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var claudeConfigDir = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
-        var resolvedDir = string.IsNullOrWhiteSpace(claudeConfigDir)
+        return string.IsNullOrWhiteSpace(claudeConfigDir)
             ? Path.Combine(userProfile, ".claude")
             : claudeConfigDir;
-        return Path.Combine(resolvedDir, "settings.json");
+    }
+
+    private static string GetClaudeProjectsPath()
+    {
+        return Path.Combine(GetClaudeConfigDir(), "projects");
+    }
+
+    private static string GetClaudeSettingsPath()
+    {
+        return Path.Combine(GetClaudeConfigDir(), "settings.json");
     }
 
     private static async Task<ToolStatusDto> GetToolStatusAsync(
@@ -3396,35 +5061,59 @@ public static class ApiEndpoints
         ProviderEntity provider,
         CancellationToken cancellationToken)
     {
-        var modelsUrl = CombineUrl(provider.Address, "/v1/models");
+        var primaryUrl = CombineUrl(provider.Address, "/models");
+        var legacyUrl = CombineUrl(provider.Address, "/v1/models");
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, modelsUrl);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", provider.ApiKey);
+        var urls = string.Equals(primaryUrl, legacyUrl, StringComparison.Ordinal)
+            ? new[] { primaryUrl }
+            : new[] { primaryUrl, legacyUrl };
 
-        using var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+        for (var i = 0; i < urls.Length; i++)
         {
-            return Array.Empty<string>();
-        }
+            var url = urls[i];
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", provider.ApiKey);
 
-        var results = new List<string>();
-        foreach (var item in data.EnumerateArray())
-        {
-            if (item.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String)
+            using var response = await client.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
             {
-                var value = idProp.GetString();
-                if (!string.IsNullOrWhiteSpace(value))
+                if (i < urls.Length - 1)
                 {
-                    results.Add(value);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            {
+                if (i < urls.Length - 1)
+                {
+                    continue;
+                }
+
+                return Array.Empty<string>();
+            }
+
+            var results = new List<string>();
+            foreach (var item in data.EnumerateArray())
+            {
+                if (item.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String)
+                {
+                    var value = idProp.GetString();
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        results.Add(value);
+                    }
                 }
             }
+
+            return results;
         }
 
-        return results;
+        return Array.Empty<string>();
     }
 
     private static async Task<IReadOnlyList<string>> FetchAnthropicModelsAsync(
