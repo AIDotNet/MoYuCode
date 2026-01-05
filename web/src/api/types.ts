@@ -28,6 +28,11 @@ export type ToolStatusDto = {
   executablePath: string | null
   configPath: string
   configExists: boolean
+  nodeInstalled: boolean
+  nodeVersion: string | null
+  npmInstalled: boolean
+  npmVersion: string | null
+  platform: string
 }
 
 export type JobDto = {

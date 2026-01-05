@@ -9,6 +9,7 @@ import {
 } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { CodePage } from '@/pages/CodePage'
+import { NodeInstallPage } from '@/pages/NodeInstallPage'
 import { ToolPage } from '@/pages/ToolPage'
 import Providers from '@/pages/Providers'
 import { ThemeTogglerButton } from '@animate-ui/components-buttons-theme-toggler'
@@ -106,6 +107,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/code" replace />} />
             <Route path="/code" element={<CodePage />} />
+            <Route path="/node" element={<NodeInstallPage />} />
             <Route path="/codex" element={<ToolPage tool="codex" title="Codex" />} />
             <Route path="/claude" element={<ToolPage tool="claude" title="Claude Code" />} />
             <Route path="/providers" element={<Providers />} />

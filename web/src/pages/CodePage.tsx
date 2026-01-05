@@ -5,14 +5,17 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
-  type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { api } from '@/api/client'
-import type { ProjectDto, ToolType } from '@/api/types'
+import { api, formatUtc } from '@/api/client'
+import type { ProjectDto, ProjectSessionDto, ToolStatusDto, ToolType } from '@/api/types'
 import { cn } from '@/lib/utils'
+import { SessionTraceBar, TokenUsageColumnChart } from '@/components/CodexSessionViz'
 import { Modal } from '@/components/Modal'
+import { CodePageHeader } from '@/pages/code/CodePageHeader'
+import { ProjectSelectionCard } from '@/pages/code/ProjectSelectionCard'
+import { ProjectUpsertModal } from '@/pages/code/ProjectUpsertModal'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,106 +30,64 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { ProjectWorkspacePage, type ProjectWorkspaceHandle } from '@/pages/ProjectWorkspacePage'
-import { ChevronDown, FileText, Folder, RefreshCw, Search, Terminal, X } from 'lucide-react'
+import { FileText, Folder, RefreshCw, Terminal, X } from 'lucide-react'
 
 const SELECTED_PROJECT_STORAGE_KEY = 'onecode:code:selected-project-id:v1'
 
-function CodePageHeader({
-  pickerAnchorRef,
-  pickerOpen,
-  pickerButtonLabel,
-  onTogglePicker,
-  onOpenMenu,
-  actionsAnchorRef,
-  actionsOpen,
-  onToggleActions,
-  scanning,
-  showScanButton,
-  onScan,
-}: {
-  pickerAnchorRef: RefObject<HTMLButtonElement | null>
-  pickerOpen: boolean
-  pickerButtonLabel: string
-  onTogglePicker: () => void
-  onOpenMenu: (e: ReactMouseEvent<HTMLButtonElement>) => void
-  actionsAnchorRef: RefObject<HTMLButtonElement | null>
-  actionsOpen: boolean
-  onToggleActions: () => void
-  scanning: boolean
-  showScanButton: boolean
-  onScan: () => void
-}) {
-  return (
-    <header className="shrink-0 flex h-8 items-center justify-between gap-3">
-      <div className="min-w-0">
-        <button
-          ref={pickerAnchorRef}
-          type="button"
-          className={cn(
-            'group inline-flex h-8 max-w-full items-center gap-2 rounded-md border px-2 text-left text-sm font-medium',
-            'bg-background shadow-xs',
-            'transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-out',
-            'hover:bg-accent hover:text-accent-foreground',
-            'active:scale-[0.98]',
-            pickerOpen && 'bg-accent text-accent-foreground shadow-sm',
-          )}
-          onClick={onTogglePicker}
-          onContextMenu={onOpenMenu}
-        >
-          <Folder className="size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-current" />
-          <span className="truncate">{pickerButtonLabel}</span>
-          <ChevronDown
-            className={cn(
-              'size-4 shrink-0 text-muted-foreground transition-[transform,color] duration-200 ease-out group-hover:text-current',
-              pickerOpen && 'rotate-180',
-            )}
-          />
-        </button>
-      </div>
+type SessionsCacheEntry = {
+  cachedAt: number
+  sessions: ProjectSessionDto[]
+}
 
-      <div className="flex shrink-0 items-center gap-2">
-        <Button asChild variant="outline" size="sm" className="group">
-          <button
-            ref={actionsAnchorRef}
-            type="button"
-            onClick={onToggleActions}
-            aria-haspopup="menu"
-            aria-expanded={actionsOpen}
-            title="更多功能"
-          >
-            更多功能
-            <ChevronDown
-              className={cn(
-                'size-4 shrink-0 text-muted-foreground transition-[transform,color] duration-200 ease-out group-hover:text-current',
-                actionsOpen && 'rotate-180',
-              )}
-            />
-          </button>
-        </Button>
-        {showScanButton ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={scanning}
-            onClick={onScan}
-            title="扫描 Codex sessions 并创建项目"
-          >
-            {scanning ? (
-              <span className="inline-flex items-center gap-2">
-                <Spinner /> 扫描中
-              </span>
-            ) : (
-              <>
-                <Search className="size-4" />
-                扫描项目
-              </>
-            )}
-          </Button>
-        ) : null}
-      </div>
-    </header>
+const sessionsCache = new Map<string, SessionsCacheEntry>()
+const sessionsCacheTtlMs = 60_000
+
+function sumSessionTokens(s: ProjectSessionDto): number {
+  return (
+    (s.tokenUsage?.inputTokens ?? 0) +
+    (s.tokenUsage?.cachedInputTokens ?? 0) +
+    (s.tokenUsage?.outputTokens ?? 0) +
+    (s.tokenUsage?.reasoningOutputTokens ?? 0)
   )
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+
+  if (hours > 0) return `${hours}小时${minutes}分`
+  if (minutes > 0) return `${minutes}分${seconds}秒`
+  return `${seconds}秒`
+}
+
+function formatCompactNumber(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  const stripTrailingZero = (raw: string) =>
+    raw.endsWith('.0') ? raw.slice(0, -2) : raw
+
+  if (abs < 1000) return value.toLocaleString()
+
+  if (abs < 1_000_000) {
+    const n = abs / 1000
+    const decimals = n >= 100 ? 0 : 1
+    return `${sign}${stripTrailingZero(n.toFixed(decimals))}K`
+  }
+
+  if (abs < 1_000_000_000) {
+    const n = abs / 1_000_000
+    const decimals = n >= 100 ? 0 : 1
+    return `${sign}${stripTrailingZero(n.toFixed(decimals))}M`
+  }
+
+  const n = abs / 1_000_000_000
+  const decimals = n >= 100 ? 0 : 1
+  return `${sign}${stripTrailingZero(n.toFixed(decimals))}B`
 }
 
 function readStoredProjectId(): string | null {
@@ -185,6 +146,8 @@ export function CodePage() {
   const [initialLoadDone, setInitialLoadDone] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const [codexStatus, setCodexStatus] = useState<ToolStatusDto | null>(null)
+
   const [scanning, setScanning] = useState(false)
   const [scanLogs, setScanLogs] = useState<string[]>([])
   const scanEventSourceRef = useRef<EventSource | null>(null)
@@ -213,6 +176,10 @@ export function CodePage() {
   >(null)
   const closeActionsMenu = useCallback(() => setActionsMenuOpen(false), [])
 
+  const [upsertOpen, setUpsertOpen] = useState(false)
+  const [upsertMode, setUpsertMode] = useState<'create' | 'edit'>('create')
+  const [upsertTarget, setUpsertTarget] = useState<ProjectDto | null>(null)
+
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
@@ -234,6 +201,15 @@ export function CodePage() {
       return next
     })
   }, [closePicker, closeProjectMenu])
+
+  const openCreateProject = useCallback(() => {
+    closeActionsMenu()
+    closePicker()
+    closeProjectMenu()
+    setUpsertMode('create')
+    setUpsertTarget(null)
+    setUpsertOpen(true)
+  }, [closeActionsMenu, closePicker, closeProjectMenu])
 
   useEffect(() => {
     return () => {
@@ -331,6 +307,18 @@ export function CodePage() {
     }
   }, [])
 
+  const loadCodexStatus = useCallback(async (): Promise<ToolStatusDto | null> => {
+    try {
+      const status = await api.tools.status('codex')
+      setCodexStatus(status)
+      return status
+    } catch (e) {
+      setError((e as Error).message)
+      setCodexStatus(null)
+      return null
+    }
+  }, [])
+
   const refreshProjectsList = useCallback(() => {
     closeActionsMenu()
     void loadProjects()
@@ -350,12 +338,13 @@ export function CodePage() {
   const openCodexConfigToml = useCallback(async () => {
     closeActionsMenu()
     try {
-      const status = await api.tools.status('codex')
+      const status = await loadCodexStatus()
+      if (!status) return
       workspaceRef.current?.openFile(status.configPath)
     } catch (e) {
       setError((e as Error).message)
     }
-  }, [closeActionsMenu])
+  }, [closeActionsMenu, loadCodexStatus])
 
   const appendScanLog = useCallback((line: string) => {
     setScanLogs((prev) => {
@@ -371,7 +360,7 @@ export function CodePage() {
     setScanning(false)
   }, [])
 
-  const startScan = useCallback((opts?: { force?: boolean }) => {
+  const startScan = useCallback(async (opts?: { force?: boolean }) => {
     if (scanning) return
     const force = Boolean(opts?.force)
     if (!force) {
@@ -385,6 +374,18 @@ export function CodePage() {
     setScanning(true)
 
     scanEventSourceRef.current?.close()
+    scanEventSourceRef.current = null
+
+    appendScanLog('执行：codex -V')
+    const status = await loadCodexStatus()
+    if (!status?.installed) {
+      appendScanLog('未检测到 Codex CLI：请先安装 Codex，然后重试。')
+      setScanning(false)
+      return
+    }
+
+    appendScanLog(`Codex 版本：${status.version ?? '—'}`)
+
     const eventSource = api.projects.scanCodexSessions('Codex')
     scanEventSourceRef.current = eventSource
 
@@ -407,24 +408,102 @@ export function CodePage() {
       scanEventSourceRef.current = null
       setScanning(false)
     }
-  }, [appendScanLog, initialLoadDone, loadProjects, projects.length, scanning])
+  }, [appendScanLog, initialLoadDone, loadCodexStatus, loadProjects, projects.length, scanning])
 
   useEffect(() => {
     void loadProjects()
+    void loadCodexStatus()
     return () => {
       scanEventSourceRef.current?.close()
       scanEventSourceRef.current = null
     }
-  }, [loadProjects])
+  }, [loadCodexStatus, loadProjects])
 
   useEffect(() => {
-    startScan()
+    void startScan()
   }, [startScan])
 
   const selectedProject = useMemo(() => {
     if (!projectIdFromQuery) return null
     return projects.find((p) => p.id === projectIdFromQuery) ?? null
   }, [projectIdFromQuery, projects])
+
+  const [sessions, setSessions] = useState<ProjectSessionDto[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsError, setSessionsError] = useState<string | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [copyResumeHint, setCopyResumeHint] = useState<string | null>(null)
+
+  const selectedProjectId = selectedProject?.id ?? null
+
+  const loadSessions = useCallback(
+    async ({ force }: { force?: boolean } = {}) => {
+      const project = selectedProject
+      if (!project) {
+        setSessions([])
+        setSessionsError(null)
+        setSessionsLoading(false)
+        return
+      }
+
+      const cached = sessionsCache.get(project.id)
+      const isFresh = cached && Date.now() - cached.cachedAt < sessionsCacheTtlMs
+
+      if (!force && cached && isFresh) {
+        setSessions(cached.sessions)
+        setSessionsError(null)
+        setSessionsLoading(false)
+        setSelectedSessionId((current) => {
+          if (!current) return current
+          return cached.sessions.some((s) => s.id === current) ? current : null
+        })
+        return
+      }
+
+      setSessionsLoading(true)
+      setSessionsError(null)
+      try {
+        const data = await api.projects.sessions(project.id)
+        sessionsCache.set(project.id, { cachedAt: Date.now(), sessions: data })
+        setSessions(data)
+        setSelectedSessionId((current) => {
+          if (!current) return current
+          return data.some((s) => s.id === current) ? current : null
+        })
+      } catch (e) {
+        setSessionsError((e as Error).message)
+      } finally {
+        setSessionsLoading(false)
+      }
+    },
+    [selectedProject],
+  )
+
+  useEffect(() => {
+    setCopyResumeHint(null)
+  }, [selectedProjectId, selectedSessionId])
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setSessions([])
+      setSelectedSessionId(null)
+      setSessionsError(null)
+      setSessionsLoading(false)
+      return
+    }
+
+    // 默认不选择会话；切换项目时清空选择并重新加载会话列表。
+    setSelectedSessionId(null)
+    setSessions([])
+    setSessionsError(null)
+    setSessionsLoading(true)
+    void loadSessions()
+  }, [loadSessions, selectedProjectId])
+
+  const selectedSession = useMemo(() => {
+    if (!selectedSessionId) return null
+    return sessions.find((s) => s.id === selectedSessionId) ?? null
+  }, [selectedSessionId, sessions])
 
   useEffect(() => {
     if (projectIdFromQuery) return
@@ -581,9 +660,10 @@ export function CodePage() {
   const openEdit = useCallback(() => {
     if (!selectedProject) return
     closeProjectMenu()
-    const base = selectedProject.toolType === 'Codex' ? '/codex' : '/claude'
-    navigate(`${base}?tab=projects`)
-  }, [closeProjectMenu, navigate, selectedProject])
+    setUpsertMode('edit')
+    setUpsertTarget(selectedProject)
+    setUpsertOpen(true)
+  }, [closeProjectMenu, selectedProject])
 
   const openDelete = useCallback(() => {
     if (!selectedProject) return
@@ -638,7 +718,7 @@ export function CodePage() {
         onToggleActions={toggleActionsMenu}
         scanning={scanning}
         showScanButton={!projects.length}
-        onScan={() => startScan({ force: true })}
+        onScan={() => void startScan({ force: true })}
       />
 
       {error ? (
@@ -654,56 +734,227 @@ export function CodePage() {
         )}
       >
         {!selectedProject ? (
-          <div className="rounded-lg border bg-card p-4 animate-in fade-in-0 duration-200">
-            <div className="text-sm font-medium">先选择一个项目</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              选择后会打开工作区，并将路由固定为 <code className="px-1">/code?projects=id</code>。
+          <ProjectSelectionCard
+            projects={projects}
+            scanning={scanning}
+            scanLogs={scanLogs}
+            codexStatus={codexStatus}
+            onSelectProject={selectProject}
+            onCreateProject={openCreateProject}
+            onScanProjects={() => void startScan({ force: true })}
+            onStopScan={stopScan}
+            onGoInstallCodex={() => navigate('/codex')}
+          />
+        ) : (
+          <div className="h-full min-h-0 animate-in fade-in-0 duration-200 overflow-hidden flex flex-col gap-4 lg:flex-row">
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+              <ProjectWorkspacePage
+                ref={workspaceRef}
+                key={selectedProject.id}
+                projectId={selectedProject.id}
+              />
             </div>
 
-            {!projects.length ? (
-              <div className="mt-4 space-y-3">
-                <div className="text-sm text-muted-foreground">
-                  {scanning ? '正在自动扫描项目…' : '暂无项目。'}
+            <aside className="min-h-0 overflow-hidden rounded-lg border bg-card flex flex-col lg:w-[380px]">
+              <div className="shrink-0 border-b px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">
+                      会话 {sessions.length ? `（${sessions.length}）` : ''}
+                    </div>
+                    <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                      默认不选择；点击会话加载记录并展示。
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={sessionsLoading}
+                      onClick={() => void loadSessions({ force: true })}
+                    >
+                      刷新
+                      {sessionsLoading ? <Spinner /> : null}
+                    </Button>
+                    {selectedSessionId ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedSessionId(null)}
+                      >
+                        取消选择
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
-                {scanLogs.length ? (
-                  <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">
-                    {scanLogs.join('\n')}
-                  </pre>
-                ) : null}
-                {scanning ? (
-                  <Button type="button" variant="outline" onClick={stopScan}>
-                    停止扫描
-                  </Button>
-                ) : null}
               </div>
-            ) : (
-              <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {projects.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className={cn(
-                      'rounded-md border bg-background p-3 text-left',
-                      'transition-[background-color,border-color,box-shadow,transform] duration-200 ease-out',
-                      'hover:bg-accent/40 hover:border-border hover:shadow-sm',
-                      'active:scale-[0.99]',
-                    )}
-                    onClick={() => selectProject(p.id)}
-                  >
-                    <div className="truncate text-sm font-medium">{p.name}</div>
-                    <div className="mt-1 truncate text-xs text-muted-foreground">{p.workspacePath}</div>
-                  </button>
-                ))}
+
+              {sessionsError ? (
+                <div className="shrink-0 border-b bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {sessionsError}
+                </div>
+              ) : null}
+
+              <div className="min-h-0 flex-1 overflow-hidden flex flex-col">
+                <div
+                  className={cn(
+                    'min-h-0 flex-1 overflow-auto bg-background/30',
+                    selectedSession ? 'border-b' : '',
+                  )}
+                >
+                  {sessions.length ? (
+                    <div className="space-y-1 p-2">
+                      {sessions.map((s) => {
+                        const isActive = s.id === selectedSessionId
+                        const totalTokens = sumSessionTokens(s)
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            className={cn(
+                              'w-full rounded-md border border-transparent px-3 py-2 text-left transition-colors',
+                              'hover:bg-accent/40',
+                              isActive
+                                ? 'border-border bg-accent/40'
+                                : 'bg-transparent',
+                            )}
+                            onClick={() => setSelectedSessionId(s.id)}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">
+                                  {formatUtc(s.createdAtUtc)}
+                                </div>
+                                <div className="truncate text-[11px] text-muted-foreground">
+                                  {s.id}
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right text-[11px] text-muted-foreground tabular-nums">
+                                <div>{formatDuration(s.durationMs)}</div>
+                                <div
+                                  title={`总计 ${totalTokens.toLocaleString()} Token`}
+                                >
+                                  {formatCompactNumber(totalTokens)} Token
+                                </div>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="px-3 py-6 text-sm text-muted-foreground">
+                      {sessionsLoading ? '加载中…' : '未找到会话。'}
+                    </div>
+                  )}
+                </div>
+
+                {selectedSession ? (
+                  <div className="shrink-0 max-h-[45%] overflow-auto p-3 space-y-3">
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-muted-foreground">
+                        会话信息
+                      </div>
+                      <div className="text-sm font-medium">
+                        {formatUtc(selectedSession.createdAtUtc)}
+                      </div>
+                      <div className="break-all text-[11px] text-muted-foreground">
+                        {selectedSession.id}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        结束：{formatUtc(selectedSession.lastEventAtUtc)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-md border bg-background/40 p-3">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="text-xs font-medium text-muted-foreground">
+                          Token
+                        </div>
+                        <div
+                          className="text-xs text-muted-foreground tabular-nums"
+                          title={`总计 ${sumSessionTokens(selectedSession).toLocaleString()} Token`}
+                        >
+                          {formatCompactNumber(sumSessionTokens(selectedSession))}{' '}
+                          Token
+                        </div>
+                      </div>
+                      <div className="mt-2">
+                        <TokenUsageColumnChart usage={selectedSession.tokenUsage} />
+                      </div>
+                    </div>
+
+                    {selectedSession.trace?.length ? (
+                      <div className="rounded-md border bg-background/40 p-3">
+                        <div className="text-xs font-medium text-muted-foreground">
+                          时间线
+                        </div>
+                        <div className="mt-2">
+                          <SessionTraceBar
+                            trace={selectedSession.trace ?? []}
+                            durationMs={selectedSession.durationMs}
+                            collapseWaiting
+                            waitingClampMs={30_000}
+                          />
+                        </div>
+                        <div className="mt-2 text-[11px] text-muted-foreground">
+                          鼠标移入色块：类型 / Token / 次数 / 时长。
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedProject.toolType === 'Codex' ? (
+                      <div className="rounded-md border bg-background/40 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-medium text-muted-foreground">
+                            codex resume
+                          </div>
+                          {copyResumeHint ? (
+                            <div className="text-[11px] text-muted-foreground">
+                              {copyResumeHint}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-[11px]">
+                            codex resume {selectedSession.id}
+                          </code>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const command = `codex resume ${selectedSession.id}`
+                              void (async () => {
+                                try {
+                                  await navigator.clipboard.writeText(command)
+                                  setCopyResumeHint('已复制')
+                                } catch {
+                                  setCopyResumeHint('复制失败')
+                                }
+                              })()
+                            }}
+                          >
+                            复制
+                          </Button>
+                        </div>
+                        <div className="mt-2 text-[11px] text-muted-foreground">
+                          可用 <code className="px-1">--last</code> 自动恢复最近会话，
+                          或指定 <code className="px-1">SESSION_ID</code> 恢复指定会话。
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="shrink-0 border-t p-3 text-sm text-muted-foreground">
+                    请选择右侧会话以查看记录；不选择则保持当前工作区对话为新会话。
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        ) : (
-          <div className="h-full min-h-0 animate-in fade-in-0 duration-200">
-            <ProjectWorkspacePage
-              ref={workspaceRef}
-              key={selectedProject.id}
-              projectId={selectedProject.id}
-            />
+            </aside>
           </div>
         )}
       </div>
@@ -730,6 +981,15 @@ export function CodePage() {
               >
                 {loading ? <Spinner /> : <RefreshCw className="size-4 text-muted-foreground" />}
                 {loading ? '刷新中' : '刷新项目列表'}
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+                disabled={scanning}
+                onClick={openCreateProject}
+              >
+                <Folder className="size-4 text-muted-foreground" />
+                新建项目
               </button>
               <div className="h-px bg-border" />
               <button
@@ -899,6 +1159,22 @@ export function CodePage() {
             document.body,
           )
         : null}
+
+      <ProjectUpsertModal
+        open={upsertOpen}
+        mode={upsertMode}
+        project={upsertMode === 'edit' ? upsertTarget : null}
+        defaultToolType={selectedProject?.toolType ?? 'Codex'}
+        onClose={() => {
+          setUpsertOpen(false)
+          setUpsertTarget(null)
+        }}
+        onSaved={(project) => {
+          setUpsertOpen(false)
+          setUpsertTarget(null)
+          void loadProjects().then(() => selectProject(project.id))
+        }}
+      />
 
       <Modal
         open={renameOpen}

@@ -38,6 +38,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<JobManager>();
 builder.Services.AddSingleton<PowerShellLauncher>();
+builder.Services.AddSingleton<TerminalWindowLauncher>();
 builder.Services.AddSingleton<A2aTaskManager>();
 builder.Services.AddSingleton<CodexAppServerClient>();
 builder.Services.AddSingleton<CodexSessionManager>();

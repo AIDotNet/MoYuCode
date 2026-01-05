@@ -87,6 +87,7 @@ export const api = {
   tools: {
     status: (tool: ToolKey) => http<ToolStatusDto>(`/api/tools/${tool}/status`),
     install: (tool: ToolKey) => http<JobDto>(`/api/tools/${tool}/install`, { method: 'POST' }),
+    installNode: () => http<JobDto>(`/api/tools/node/install`, { method: 'POST' }),
     codexTokenUsage: (forceRefresh = false) =>
       http<SessionTokenUsageDto>(
         `/api/tools/codex/token-usage${forceRefresh ? '?forceRefresh=true' : ''}`,

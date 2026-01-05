@@ -417,7 +417,11 @@ public static class ApiEndpoints
             var configPath = GetCodexConfigPath();
             return await GetToolStatusAsync(
                 toolName: "codex",
-                versionArgs: "--version",
+                versionArgumentLists: new[]
+                {
+                    new[] { "-V" },
+                    new[] { "--version" },
+                },
                 configPath: configPath,
                 parseVersion: ParseCodexVersion,
                 cancellationToken);
@@ -428,28 +432,56 @@ public static class ApiEndpoints
             var configPath = GetClaudeSettingsPath();
             return await GetToolStatusAsync(
                 toolName: "claude",
-                versionArgs: "--version",
+                versionArgumentLists: new[]
+                {
+                    new[] { "--version" },
+                },
                 configPath: configPath,
                 parseVersion: ParseClaudeVersion,
                 cancellationToken);
         });
 
-        tools.MapPost("/codex/install", (JobManager jobManager, HttpContext httpContext) =>
+        tools.MapPost("/node/install", async (
+            JobManager jobManager,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
         {
+            var (fileName, arguments) = await GetNodeInstallCommandAsync(cancellationToken);
             var job = jobManager.StartProcessJob(
-                kind: "install:codex",
-                fileName: "npm",
-                arguments: "install -g @openai/codex");
+                kind: "install:node",
+                fileName: fileName,
+                arguments: arguments);
+
             httpContext.Response.StatusCode = StatusCodes.Status202Accepted;
             return job;
         });
 
-        tools.MapPost("/claude/install", (JobManager jobManager, HttpContext httpContext) =>
+        tools.MapPost("/codex/install", async (
+            JobManager jobManager,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
         {
+            await EnsureNodeAndNpmInstalledAsync(cancellationToken);
+            var (fileName, arguments) = GetNpmGlobalInstallCommand("@openai/codex");
+            var job = jobManager.StartProcessJob(
+                kind: "install:codex",
+                fileName: fileName,
+                arguments: arguments);
+            httpContext.Response.StatusCode = StatusCodes.Status202Accepted;
+            return job;
+        });
+
+        tools.MapPost("/claude/install", async (
+            JobManager jobManager,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
+        {
+            await EnsureNodeAndNpmInstalledAsync(cancellationToken);
+            var (fileName, arguments) = GetNpmGlobalInstallCommand("@anthropic-ai/claude-code");
             var job = jobManager.StartProcessJob(
                 kind: "install:claude",
-                fileName: "npm",
-                arguments: "install -g @anthropic-ai/claude-code");
+                fileName: fileName,
+                arguments: arguments);
             httpContext.Response.StatusCode = StatusCodes.Status202Accepted;
             return job;
         });
@@ -1022,7 +1054,7 @@ public static class ApiEndpoints
             }
         });
 
-        fs.MapPost("/terminal", (string path, PowerShellLauncher powerShellLauncher) =>
+        fs.MapPost("/terminal", (string path, TerminalWindowLauncher terminalWindowLauncher) =>
         {
             if (string.IsNullOrWhiteSpace(path))
             {
@@ -1047,10 +1079,9 @@ public static class ApiEndpoints
             }
 
             var directoryInfo = new DirectoryInfo(workingDirectory);
-            powerShellLauncher.LaunchNewWindow(
+            terminalWindowLauncher.LaunchShellWindow(
                 workingDirectory: directoryInfo.FullName,
                 windowTitle: $"OneCode - Terminal - {directoryInfo.Name}",
-                command: string.Empty,
                 environment: null);
         });
     }
@@ -1330,7 +1361,7 @@ public static class ApiEndpoints
         projects.MapPost("/{id:guid}/start", async (
             Guid id,
             OneCodeDbContext db,
-            PowerShellLauncher powerShellLauncher,
+            TerminalWindowLauncher terminalWindowLauncher,
             CancellationToken cancellationToken) =>
         {
             var project = await db.Projects
@@ -1347,7 +1378,7 @@ public static class ApiEndpoints
                 throw new ApiHttpException(StatusCodes.Status400BadRequest, "WorkspacePath does not exist.");
             }
 
-            (string Command, IReadOnlyDictionary<string, string>? Env) launch;
+            (IReadOnlyList<string> Args, IReadOnlyDictionary<string, string>? Env) launch;
             try
             {
                 launch = project.ToolType switch
@@ -1362,10 +1393,10 @@ public static class ApiEndpoints
                 throw new ApiHttpException(StatusCodes.Status400BadRequest, ex.Message);
             }
 
-            powerShellLauncher.LaunchNewWindow(
+            terminalWindowLauncher.LaunchCommandWindow(
                 workingDirectory: project.WorkspacePath,
                 windowTitle: $"OneCode - {project.ToolType} - {project.Name}",
-                command: launch.Command,
+                argv: launch.Args,
                 environment: launch.Env);
 
             project.LastStartedAtUtc = DateTimeOffset.UtcNow;
@@ -4862,59 +4893,288 @@ public static class ApiEndpoints
         return Path.Combine(GetClaudeConfigDir(), "settings.json");
     }
 
+    private static string GetPlatformKey()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return "windows";
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            return "macos";
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return "linux";
+        }
+
+        return "unknown";
+    }
+
+    private static IReadOnlyDictionary<string, string>? BuildToolEnvironment(out string? windowsNpmBin)
+    {
+        windowsNpmBin = null;
+        Dictionary<string, string>? environment = null;
+
+        if (OperatingSystem.IsWindows())
+        {
+            windowsNpmBin = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "npm");
+
+            if (Directory.Exists(windowsNpmBin))
+            {
+                var existingPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                var segments = existingPath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+                if (!segments.Contains(windowsNpmBin, StringComparer.OrdinalIgnoreCase))
+                {
+                    environment = new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["PATH"] = $"{windowsNpmBin}{Path.PathSeparator}{existingPath}",
+                    };
+                }
+            }
+        }
+
+        return environment;
+    }
+
+    private static async Task<string?> TryRunToolAndReadFirstLineAsync(
+        string toolNameOrPath,
+        IReadOnlyList<string> args,
+        int timeoutMs,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var argv = new List<string>(2 + args.Count)
+            {
+                "/c",
+                toolNameOrPath,
+            };
+            argv.AddRange(args);
+
+            return await TryRunAndReadFirstLineAsync(
+                fileName: "cmd.exe",
+                argumentList: argv,
+                timeoutMs: timeoutMs,
+                cancellationToken: cancellationToken,
+                environment);
+        }
+
+        return await TryRunAndReadFirstLineAsync(
+            fileName: toolNameOrPath,
+            argumentList: args,
+            timeoutMs: timeoutMs,
+            cancellationToken: cancellationToken,
+            environment);
+    }
+
+    private static async Task<string?> TryResolveToolPathAsync(
+        string toolName,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return await TryRunToolAndReadFirstLineAsync(
+                toolNameOrPath: "where",
+                args: [toolName],
+                timeoutMs: 6000,
+                cancellationToken,
+                environment);
+        }
+
+        return await TryRunToolAndReadFirstLineAsync(
+            toolNameOrPath: "which",
+            args: [toolName],
+            timeoutMs: 6000,
+            cancellationToken,
+            environment);
+    }
+
+    private static async Task<(bool Installed, string? Version)> GetSimpleVersionStatusAsync(
+        string toolName,
+        IReadOnlyList<string> args,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        var line = await TryRunToolAndReadFirstLineAsync(
+            toolNameOrPath: toolName,
+            args: args,
+            timeoutMs: 8000,
+            cancellationToken,
+            environment);
+
+        return !string.IsNullOrWhiteSpace(line) && TryParseVersionToken(line, out var parsed)
+            ? (true, parsed)
+            : (false, null);
+    }
+
+    private static async Task<(bool NodeInstalled, string? NodeVersion, bool NpmInstalled, string? NpmVersion)>
+        GetNodeAndNpmStatusAsync(
+            CancellationToken cancellationToken,
+            IReadOnlyDictionary<string, string>? environment = null)
+    {
+        var (nodeInstalled, nodeVersion) = await GetSimpleVersionStatusAsync(
+            toolName: "node",
+            args: ["--version"],
+            cancellationToken,
+            environment);
+
+        var (npmInstalled, npmVersion) = await GetSimpleVersionStatusAsync(
+            toolName: "npm",
+            args: ["--version"],
+            cancellationToken,
+            environment);
+
+        return (nodeInstalled, nodeVersion, npmInstalled, npmVersion);
+    }
+
+    private static async Task EnsureNodeAndNpmInstalledAsync(CancellationToken cancellationToken)
+    {
+        var environment = BuildToolEnvironment(out _);
+        var (nodeInstalled, _, npmInstalled, _) = await GetNodeAndNpmStatusAsync(cancellationToken, environment);
+        if (!nodeInstalled || !npmInstalled)
+        {
+            throw new ApiHttpException(StatusCodes.Status400BadRequest, "安装需要 Node.js 与 npm，请先安装 Node.js。");
+        }
+    }
+
+    private static (string FileName, string Arguments) GetNpmGlobalInstallCommand(string packageName)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return ("cmd.exe", $"/c npm install -g {packageName}");
+        }
+
+        return ("npm", $"install -g {packageName}");
+    }
+
+    private static async Task<(string FileName, string Arguments)> GetNodeInstallCommandAsync(
+        CancellationToken cancellationToken)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var winget = await TryRunToolAndReadFirstLineAsync(
+                toolNameOrPath: "winget",
+                args: ["--version"],
+                timeoutMs: 8000,
+                cancellationToken);
+
+            if (winget is null)
+            {
+                throw new ApiHttpException(
+                    StatusCodes.Status400BadRequest,
+                    "未检测到 winget：请先安装 App Installer，或手动安装 Node.js LTS。");
+            }
+
+            return (
+                "winget",
+                "install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements");
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var brew = await TryRunToolAndReadFirstLineAsync(
+                toolNameOrPath: "brew",
+                args: ["--version"],
+                timeoutMs: 8000,
+                cancellationToken);
+
+            if (brew is null)
+            {
+                throw new ApiHttpException(
+                    StatusCodes.Status400BadRequest,
+                    "未检测到 Homebrew：请先安装 Homebrew，或手动安装 Node.js。");
+            }
+
+            return ("brew", "install node");
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            if (!string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ApiHttpException(
+                    StatusCodes.Status400BadRequest,
+                    "Linux 自动安装 Node.js 需要 root 权限，请使用系统包管理器安装，或以 root 运行服务。");
+            }
+
+            var script = "set -e; " +
+                         "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y nodejs npm; " +
+                         "elif command -v dnf >/dev/null 2>&1; then dnf install -y nodejs npm; " +
+                         "elif command -v yum >/dev/null 2>&1; then yum install -y nodejs npm; " +
+                         "elif command -v apk >/dev/null 2>&1; then apk add --no-cache nodejs npm; " +
+                         "elif command -v pacman >/dev/null 2>&1; then pacman -Syu --noconfirm nodejs npm; " +
+                         "elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install nodejs npm; " +
+                         "else echo 'No supported package manager found.' >&2; exit 1; fi";
+
+            return ("/bin/sh", $"-c \"{script}\"");
+        }
+
+        throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unsupported operating system.");
+    }
+
     private static async Task<ToolStatusDto> GetToolStatusAsync(
         string toolName,
-        string versionArgs,
+        IReadOnlyList<string[]> versionArgumentLists,
         string configPath,
         Func<string, string?> parseVersion,
         CancellationToken cancellationToken)
     {
         var configExists = File.Exists(configPath);
+        var platform = GetPlatformKey();
+        var environment = BuildToolEnvironment(out var windowsNpmBin);
 
-        var npmBin = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "npm");
-
-        var environment = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (Directory.Exists(npmBin))
-        {
-            var existingPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-            if (!existingPath.Split(';', StringSplitOptions.RemoveEmptyEntries).Contains(npmBin, StringComparer.OrdinalIgnoreCase))
-            {
-                environment["PATH"] = $"{npmBin};{existingPath}";
-            }
-        }
+        var (nodeInstalled, nodeVersion, npmInstalled, npmVersion) = await GetNodeAndNpmStatusAsync(
+            cancellationToken,
+            environment);
 
         string? exePath = null;
-        if (Directory.Exists(npmBin))
+        if (OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(windowsNpmBin))
         {
-            var shim = Path.Combine(npmBin, $"{toolName}.cmd");
+            var shim = Path.Combine(windowsNpmBin, $"{toolName}.cmd");
             if (File.Exists(shim))
             {
                 exePath = shim;
             }
         }
 
+        exePath ??= await TryResolveToolPathAsync(toolName, cancellationToken, environment);
+
         string? versionOutput = null;
-
-        if (!string.IsNullOrWhiteSpace(exePath))
+        foreach (var args in versionArgumentLists)
         {
-            versionOutput = await TryRunAndReadFirstLineAsync(
-                fileName: "cmd.exe",
-                argumentList: ["/c", exePath, versionArgs],
+            if (!string.IsNullOrWhiteSpace(exePath))
+            {
+                versionOutput = await TryRunToolAndReadFirstLineAsync(
+                    toolNameOrPath: exePath,
+                    args: args,
+                    timeoutMs: 15000,
+                    cancellationToken,
+                    environment);
+            }
+
+            if (!string.IsNullOrWhiteSpace(versionOutput))
+            {
+                break;
+            }
+
+            versionOutput = await TryRunToolAndReadFirstLineAsync(
+                toolNameOrPath: toolName,
+                args: args,
                 timeoutMs: 15000,
                 cancellationToken,
                 environment);
-        }
 
-        if (string.IsNullOrWhiteSpace(versionOutput))
-        {
-            versionOutput = await TryRunAndReadFirstLineAsync(
-                fileName: "cmd.exe",
-                argumentList: ["/c", toolName, versionArgs],
-                timeoutMs: 15000,
-                cancellationToken,
-                environment);
+            if (!string.IsNullOrWhiteSpace(versionOutput))
+            {
+                break;
+            }
         }
 
         var version = versionOutput is null ? null : parseVersion(versionOutput);
@@ -4925,7 +5185,12 @@ public static class ApiEndpoints
             Version: version,
             ExecutablePath: exePath,
             ConfigPath: configPath,
-            ConfigExists: configExists);
+            ConfigExists: configExists,
+            NodeInstalled: nodeInstalled,
+            NodeVersion: nodeVersion,
+            NpmInstalled: npmInstalled,
+            NpmVersion: npmVersion,
+            Platform: platform);
     }
 
     private static string? ParseCodexVersion(string versionLine)
@@ -5282,7 +5547,7 @@ public static class ApiEndpoints
             UpdatedAtUtc: entity.UpdatedAtUtc);
     }
 
-    private static (string Command, IReadOnlyDictionary<string, string>? Env) BuildCodexLaunch(ProjectEntity project)
+    private static (IReadOnlyList<string> Args, IReadOnlyDictionary<string, string>? Env) BuildCodexLaunch(ProjectEntity project)
     {
         if (project.Provider is not null && project.Provider.RequestType == ProviderRequestType.Anthropic)
         {
@@ -5296,16 +5561,16 @@ public static class ApiEndpoints
         {
             "codex",
             "--cd",
-            PsQuote(project.WorkspacePath),
+            project.WorkspacePath,
         };
 
         if (!string.IsNullOrWhiteSpace(project.Model))
         {
             args.Add("-m");
-            args.Add(PsQuote(project.Model!));
+            args.Add(project.Model!);
 
             args.Add("-c");
-            args.Add(PsQuote($"model=\"{EscapeTomlString(project.Model!)}\""));
+            args.Add($"model=\"{EscapeTomlString(project.Model!)}\"");
         }
 
         Dictionary<string, string>? env = null;
@@ -5317,28 +5582,28 @@ public static class ApiEndpoints
             };
 
             args.Add("-c");
-            args.Add(PsQuote($"model_provider=\"{providerId}\""));
+            args.Add($"model_provider=\"{providerId}\"");
 
             args.Add("-c");
-            args.Add(PsQuote($"model_providers.{providerId}.name=\"OneCode\""));
+            args.Add($"model_providers.{providerId}.name=\"OneCode\"");
 
             args.Add("-c");
-            args.Add(PsQuote($"model_providers.{providerId}.base_url=\"{EscapeTomlString(project.Provider.Address)}\""));
+            args.Add($"model_providers.{providerId}.base_url=\"{EscapeTomlString(project.Provider.Address)}\"");
 
             switch (project.Provider.RequestType)
             {
                 case ProviderRequestType.OpenAI:
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.wire_api=\"chat\""));
+                    args.Add($"model_providers.{providerId}.wire_api=\"chat\"");
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.env_key=\"{envKeyName}\""));
+                    args.Add($"model_providers.{providerId}.env_key=\"{envKeyName}\"");
                     break;
 
                 case ProviderRequestType.OpenAIResponses:
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.wire_api=\"responses\""));
+                    args.Add($"model_providers.{providerId}.wire_api=\"responses\"");
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.env_key=\"{envKeyName}\""));
+                    args.Add($"model_providers.{providerId}.env_key=\"{envKeyName}\"");
                     break;
 
                 case ProviderRequestType.AzureOpenAI:
@@ -5348,13 +5613,13 @@ public static class ApiEndpoints
                         : project.Provider.AzureApiVersion;
 
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.wire_api=\"responses\""));
+                    args.Add($"model_providers.{providerId}.wire_api=\"responses\"");
 
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.env_http_headers={{ \"api-key\" = \"{envKeyName}\" }}"));
+                    args.Add($"model_providers.{providerId}.env_http_headers={{ \"api-key\" = \"{envKeyName}\" }}");
 
                     args.Add("-c");
-                    args.Add(PsQuote($"model_providers.{providerId}.query_params={{ \"api-version\" = \"{EscapeTomlString(apiVersion)}\" }}"));
+                    args.Add($"model_providers.{providerId}.query_params={{ \"api-version\" = \"{EscapeTomlString(apiVersion)}\" }}");
 
                     break;
                 }
@@ -5365,10 +5630,10 @@ public static class ApiEndpoints
             }
         }
 
-        return (Command: string.Join(' ', args), Env: env);
+        return (Args: args, Env: env);
     }
 
-    private static (string Command, IReadOnlyDictionary<string, string>? Env) BuildClaudeLaunch(ProjectEntity project)
+    private static (IReadOnlyList<string> Args, IReadOnlyDictionary<string, string>? Env) BuildClaudeLaunch(ProjectEntity project)
     {
         Dictionary<string, string>? env = null;
 
@@ -5390,15 +5655,10 @@ public static class ApiEndpoints
         if (!string.IsNullOrWhiteSpace(project.Model))
         {
             args.Add("--model");
-            args.Add(PsQuote(project.Model!));
+            args.Add(project.Model!);
         }
 
-        return (Command: string.Join(' ', args), Env: env);
-    }
-
-    private static string PsQuote(string value)
-    {
-        return $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+        return (Args: args, Env: env);
     }
 
     private static string EscapeTomlString(string value)

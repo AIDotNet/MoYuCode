@@ -5,5 +5,10 @@ public sealed record ToolStatusDto(
     string? Version,
     string? ExecutablePath,
     string ConfigPath,
-    bool ConfigExists);
+    bool ConfigExists,
+    bool NodeInstalled,
+    string? NodeVersion,
+    bool NpmInstalled,
+    string? NpmVersion,
+    string Platform);
 

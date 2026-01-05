@@ -22,6 +22,7 @@ import { getVscodeFileIconUrl } from '@/lib/vscodeFileIcons'
 import { ShikiCode } from '@/components/ShikiCode'
 import { MonacoCode } from '@/components/MonacoCode'
 import { TokenUsageBar, TokenUsageDailyChart } from '@/components/CodexSessionViz'
+import { TabStrip, type TabStripItemBase } from '@/components/TabStrip'
 import { ProjectFileManager } from '@/components/project-workspace/ProjectFileManager'
 import { ProjectChat } from '@/components/project-workspace/ProjectChat'
 import { TerminalSession, type TerminalSessionHandle } from '@/components/terminal-kit'
@@ -33,7 +34,6 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Terminal,
-  X,
 } from 'lucide-react'
 
 type WorkspacePanelId = 'project-summary'
@@ -42,13 +42,14 @@ type WorkspaceView =
   | { kind: 'empty' }
   | { kind: 'file'; path: string }
   | { kind: 'diff'; file: string }
-  | { kind: 'terminal' }
+  | { kind: 'terminal'; id: string }
   | { kind: 'output' }
   | { kind: 'panel'; panelId: WorkspacePanelId }
 
 type WorkspaceTab =
   | { kind: 'file'; path: string }
   | { kind: 'diff'; file: string }
+  | { kind: 'terminal'; id: string; cwd: string }
   | { kind: 'panel'; panelId: WorkspacePanelId }
 
 type FilePreview = {
@@ -92,8 +93,26 @@ function getTabKey(tab: WorkspaceTab): string {
       return `file:${tab.path}`
     case 'diff':
       return `diff:${tab.file}`
+    case 'terminal':
+      return `terminal:${tab.id}`
     case 'panel':
       return `panel:${tab.panelId}`
+  }
+}
+
+function tryGetViewKey(view: WorkspaceView): string | null {
+  switch (view.kind) {
+    case 'file':
+      return `file:${view.path}`
+    case 'diff':
+      return `diff:${view.file}`
+    case 'terminal':
+      return `terminal:${view.id}`
+    case 'panel':
+      return `panel:${view.panelId}`
+    case 'empty':
+    case 'output':
+      return null
   }
 }
 
@@ -508,12 +527,11 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
   const [detailsPortalTarget, setDetailsPortalTarget] = useState<HTMLDivElement | null>(null)
   const detailsOpen = activeView.kind === 'output'
 
-  const terminalSessionRef = useRef<TerminalSessionHandle | null>(null)
-  const [terminalCwd, setTerminalCwd] = useState('')
-  const [terminalStatus, setTerminalStatus] = useState<
-    'connecting' | 'connected' | 'closed' | 'error'
-  >('closed')
-  const [terminalStatusError, setTerminalStatusError] = useState<string | null>(null)
+  const terminalSessionsRef = useRef<Record<string, TerminalSessionHandle | null>>({})
+  const [terminalStatusById, setTerminalStatusById] = useState<
+    Record<string, 'connecting' | 'connected' | 'closed' | 'error'>
+  >({})
+  const [terminalErrorById, setTerminalErrorById] = useState<Record<string, string | null>>({})
 
   const load = useCallback(async () => {
     if (!id) return
@@ -540,10 +558,9 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     setActiveView({ kind: 'empty' })
     setFilePreviewByPath({})
     setDiffPreviewByFile({})
-
-    setTerminalCwd(workspacePath)
-    setTerminalStatus('closed')
-    setTerminalStatusError(null)
+    terminalSessionsRef.current = {}
+    setTerminalStatusById({})
+    setTerminalErrorById({})
   }, [workspacePath])
 
   useEffect(() => {
@@ -828,19 +845,34 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     }
   }, [])
 
+  const createTerminalId = useCallback((): string => {
+    try {
+      return globalThis.crypto.randomUUID()
+    } catch {
+      return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    }
+  }, [])
+
   const openTerminal = useCallback(
     (opts?: { path?: string; focus?: boolean }) => {
-      const nextPath = (opts?.path ?? terminalCwd ?? workspacePath).trim()
-      if (nextPath) setTerminalCwd(nextPath)
+      const cwd = (opts?.path ?? workspacePath).trim()
+      if (!cwd) return
+
+      const id = createTerminalId()
+      const tab: WorkspaceTab = { kind: 'terminal', id, cwd }
 
       setToolsPanelOpen(true)
-      setActiveView({ kind: 'terminal' })
+      setTabs((prev) => [...prev, tab])
+      setActiveView({ kind: 'terminal', id })
+
+      setTerminalStatusById((prev) => ({ ...prev, [id]: 'connecting' }))
+      setTerminalErrorById((prev) => ({ ...prev, [id]: null }))
 
       if (opts?.focus) {
-        window.setTimeout(() => terminalSessionRef.current?.focus(), 0)
+        window.setTimeout(() => terminalSessionsRef.current[id]?.focus(), 0)
       }
     },
-    [terminalCwd, workspacePath],
+    [createTerminalId, workspacePath],
   )
 
   useImperativeHandle(
@@ -864,6 +896,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
           const isActive =
             (tab.kind === 'file' && view.kind === 'file' && view.path === tab.path) ||
             (tab.kind === 'diff' && view.kind === 'diff' && view.file === tab.file) ||
+            (tab.kind === 'terminal' && view.kind === 'terminal' && view.id === tab.id) ||
             (tab.kind === 'panel' && view.kind === 'panel' && view.panelId === tab.panelId)
           if (!isActive) return view
 
@@ -874,6 +907,8 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
               return { kind: 'file', path: last.path }
             case 'diff':
               return { kind: 'diff', file: last.file }
+            case 'terminal':
+              return { kind: 'terminal', id: last.id }
             case 'panel':
               return { kind: 'panel', panelId: last.panelId }
           }
@@ -892,6 +927,18 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
         setDiffPreviewByFile((prev) => {
           const next = { ...prev }
           delete next[tab.file]
+          return next
+        })
+      } else if (tab.kind === 'terminal') {
+        terminalSessionsRef.current[tab.id] = null
+        setTerminalStatusById((prev) => {
+          const next = { ...prev }
+          delete next[tab.id]
+          return next
+        })
+        setTerminalErrorById((prev) => {
+          const next = { ...prev }
+          delete next[tab.id]
           return next
         })
       }
@@ -937,20 +984,42 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     setResizing(false)
   }, [])
 
-  const mainTabs = useMemo(() => {
+  type WorkspaceMainTab = WorkspaceTab & TabStripItemBase
+
+  const mainTabs = useMemo<WorkspaceMainTab[]>(() => {
     return tabs.map((tab) => {
       if (tab.kind === 'file') {
         const dirty = Boolean(filePreviewByPath[tab.path]?.dirty)
-        const label = dirty ? `${getBaseName(tab.path)}*` : getBaseName(tab.path)
-        return { ...tab, key: getTabKey(tab), label, title: tab.path }
-      }
-
-      if (tab.kind === 'diff') {
+        const base = getBaseName(tab.path)
         return {
           ...tab,
           key: getTabKey(tab),
-          label: `Diff: ${getBaseName(tab.file)}`,
+          label: base,
+          title: tab.path,
+          dirty,
+          iconUrl: getVscodeFileIconUrl(base),
+        }
+      }
+
+      if (tab.kind === 'diff') {
+        const base = getBaseName(tab.file)
+        return {
+          ...tab,
+          key: getTabKey(tab),
+          label: `Diff: ${base}`,
           title: tab.file,
+          iconUrl: getVscodeFileIconUrl(base),
+        }
+      }
+
+      if (tab.kind === 'terminal') {
+        const base = getBaseName(tab.cwd)
+        return {
+          ...tab,
+          key: getTabKey(tab),
+          label: base ? `Terminal: ${base}` : 'Terminal',
+          title: tab.cwd,
+          icon: <Terminal className="size-4" />,
         }
       }
 
@@ -959,6 +1028,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
         key: getTabKey(tab),
         label: tab.panelId === 'project-summary' ? '汇总' : tab.panelId,
         title: tab.panelId === 'project-summary' ? '项目数据汇总' : tab.panelId,
+        icon: <Folder className="size-4" />,
       }
     })
   }, [filePreviewByPath, tabs])
@@ -986,7 +1056,13 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     }
 
     if (activeView.kind === 'terminal') {
-      const cwd = terminalCwd.trim() || workspacePath
+      const tab = tabs.find(
+        (t): t is Extract<WorkspaceTab, { kind: 'terminal' }> =>
+          t.kind === 'terminal' && t.id === activeView.id,
+      )
+      const cwd = tab ? tab.cwd.trim() || workspacePath : workspacePath
+      const terminalStatus = terminalStatusById[activeView.id] ?? 'closed'
+      const terminalStatusError = terminalErrorById[activeView.id] ?? null
       const statusLabel =
         terminalStatus === 'connected'
           ? '已连接'
@@ -1021,7 +1097,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
                   variant="outline"
                   size="sm"
                   disabled={!cwd}
-                  onClick={() => terminalSessionRef.current?.restart()}
+                  onClick={() => terminalSessionsRef.current[activeView.id]?.restart()}
                 >
                   重启
                 </Button>
@@ -1029,7 +1105,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => terminalSessionRef.current?.clear()}
+                  onClick={() => terminalSessionsRef.current[activeView.id]?.clear()}
                 >
                   清屏
                 </Button>
@@ -1048,14 +1124,16 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
 
           <div className="min-h-0 flex-1 overflow-hidden bg-black">
             <TerminalSession
-              ref={terminalSessionRef}
+              ref={(handle) => {
+                terminalSessionsRef.current[activeView.id] = handle
+              }}
               cwd={cwd}
               ariaLabel="Project terminal"
               options={{ cursorBlink: true }}
               autoFocus
               onStatusChange={(status, err) => {
-                setTerminalStatus(status)
-                setTerminalStatusError(err ?? null)
+                setTerminalStatusById((prev) => ({ ...prev, [activeView.id]: status }))
+                setTerminalErrorById((prev) => ({ ...prev, [activeView.id]: err ?? null }))
               }}
             />
           </div>
@@ -1335,91 +1413,29 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
               <div className="min-w-0 flex-1 overflow-hidden flex flex-col">
                 <div className="shrink-0 border-b px-2 py-1.5">
                   <div className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1 overflow-x-auto">
-                      <div className="flex min-w-fit items-center gap-1">
-                        {mainTabs.map((tab) => {
-                          const active =
-                            (tab.kind === 'file' &&
-                              activeView.kind === 'file' &&
-                              activeView.path === tab.path) ||
-                            (tab.kind === 'diff' &&
-                              activeView.kind === 'diff' &&
-                              activeView.file === tab.file) ||
-                            (tab.kind === 'panel' &&
-                              activeView.kind === 'panel' &&
-                              activeView.panelId === tab.panelId)
+                    <TabStrip
+                      className="min-w-0 flex-1"
+                      items={mainTabs}
+                      activeKey={tryGetViewKey(activeView)}
+                      ariaLabel="Workspace tabs"
+                      onActivate={(tab) => {
+                        if (tab.kind === 'file') {
+                          setActiveView({ kind: 'file', path: tab.path })
+                          return
+                        }
+                        if (tab.kind === 'diff') {
+                          setActiveView({ kind: 'diff', file: tab.file })
+                          return
+                        }
+                        if (tab.kind === 'terminal') {
+                          setActiveView({ kind: 'terminal', id: tab.id })
+                          return
+                        }
+                        setActiveView({ kind: 'panel', panelId: tab.panelId })
+                      }}
+                      onClose={(tab) => closeTab(tab)}
+                    />
 
-                          const iconUrl =
-                            tab.kind === 'file'
-                              ? getVscodeFileIconUrl(getBaseName(tab.path))
-                              : tab.kind === 'diff'
-                                ? getVscodeFileIconUrl(getBaseName(tab.file))
-                                : null
-                          return (
-                            <div
-                              key={tab.key}
-                              className={cn(
-                                'group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs',
-                                'max-w-[220px]',
-                                active
-                                  ? 'bg-accent text-accent-foreground'
-                                  : 'bg-background/40 text-muted-foreground hover:bg-accent/40 hover:text-foreground',
-                              )}
-                            >
-                              <button
-                                type="button"
-                                className="min-w-0 flex min-w-0 flex-1 items-center gap-1 text-left"
-                                onClick={() => {
-                                  if (tab.kind === 'file') {
-                                    setActiveView({ kind: 'file', path: tab.path })
-                                    return
-                                  }
-                                  if (tab.kind === 'diff') {
-                                    setActiveView({ kind: 'diff', file: tab.file })
-                                    return
-                                  }
-                                  setActiveView({ kind: 'panel', panelId: tab.panelId })
-                                }}
-                                title={tab.title}
-                              >
-                                {iconUrl ? (
-                                  <img
-                                    src={iconUrl}
-                                    alt=""
-                                    aria-hidden="true"
-                                    draggable={false}
-                                    className="size-4 shrink-0"
-                                  />
-                                ) : null}
-                                <span className="truncate">{tab.label}</span>
-                              </button>
-                              <button
-                                type="button"
-                                className={cn(
-                                  'rounded-sm p-0.5 text-muted-foreground hover:bg-background/60 hover:text-foreground',
-                                  'opacity-0 group-hover:opacity-100',
-                                  active ? 'opacity-100' : '',
-                                )}
-                                onClick={() => closeTab(tab)}
-                                title="关闭"
-                              >
-                                <X className="size-3" />
-                              </button>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-
-                    <Button
-                      type="button"
-                      variant={activeView.kind === 'terminal' ? 'secondary' : 'outline'}
-                      size="sm"
-                      onClick={() => openTerminal({ focus: true })}
-                      title="终端"
-                    >
-                      Terminal
-                    </Button>
                     <Button
                       type="button"
                       variant={activeView.kind === 'output' ? 'secondary' : 'outline'}
