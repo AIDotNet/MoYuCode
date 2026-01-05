@@ -27,7 +27,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { ProjectWorkspacePage, type ProjectWorkspaceHandle } from '@/pages/ProjectWorkspacePage'
-import { ChevronDown, FileText, Folder, RefreshCw, Search, X } from 'lucide-react'
+import { ChevronDown, FileText, Folder, RefreshCw, Search, Terminal, X } from 'lucide-react'
 
 const SELECTED_PROJECT_STORAGE_KEY = 'onecode:code:selected-project-id:v1'
 
@@ -340,6 +340,12 @@ export function CodePage() {
     closeActionsMenu()
     workspaceRef.current?.openProjectSummary()
   }, [closeActionsMenu])
+
+  const openWorkspaceTerminal = useCallback(() => {
+    closeActionsMenu()
+    closeProjectMenu()
+    workspaceRef.current?.openTerminal({ focus: true })
+  }, [closeActionsMenu, closeProjectMenu])
 
   const openCodexConfigToml = useCallback(async () => {
     closeActionsMenu()
@@ -739,6 +745,15 @@ export function CodePage() {
                 type="button"
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
                 disabled={!selectedProject}
+                onClick={openWorkspaceTerminal}
+              >
+                <Terminal className="size-4 text-muted-foreground" />
+                打开终端
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+                disabled={!selectedProject}
                 onClick={() => void openCodexConfigToml()}
               >
                 <FileText className="size-4 text-muted-foreground" />
@@ -863,6 +878,13 @@ export function CodePage() {
                   onClick={openRename}
                 >
                   重命名
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center px-3 py-2 text-sm hover:bg-accent"
+                  onClick={openWorkspaceTerminal}
+                >
+                  打开终端
                 </button>
                 <div className="h-px bg-border" />
                 <button

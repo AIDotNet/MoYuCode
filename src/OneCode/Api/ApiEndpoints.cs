@@ -728,6 +728,45 @@ public static class ApiEndpoints
             }
         });
 
+        fs.MapPut("/file", ([FromBody] WriteFileRequest request) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            var normalizedPath = request.Path.Trim();
+            var content = request.Content ?? string.Empty;
+
+            const int maxChars = 1_000_000;
+            if (content.Length > maxChars)
+            {
+                throw new ApiHttpException(StatusCodes.Status413PayloadTooLarge, "File too large.");
+            }
+
+            var parent = Path.GetDirectoryName(normalizedPath);
+            if (!string.IsNullOrWhiteSpace(parent) && !Directory.Exists(parent))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Directory does not exist.");
+            }
+
+            try
+            {
+                File.WriteAllText(
+                    normalizedPath,
+                    content,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new ApiHttpException(StatusCodes.Status403Forbidden, "Forbidden.");
+            }
+            catch (Exception ex) when (ex is IOException or NotSupportedException or ArgumentException)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Unable to write file.");
+            }
+        });
+
         fs.MapDelete("/entry", (string path) =>
         {
             if (string.IsNullOrWhiteSpace(path))

@@ -45,8 +45,10 @@ builder.Services.AddSingleton<CodexSessionManager>();
 var app = builder.Build();
 
 app.UseCors();
+app.UseWebSockets();
 app.MapOneCodeApis();
 app.MapA2a();
+app.MapTerminal();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

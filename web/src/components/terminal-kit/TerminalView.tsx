@@ -17,6 +17,7 @@ export type TerminalViewHandle = {
   reset: () => void
   focus: () => void
   fit: () => void
+  getSize: () => { cols: number; rows: number }
 }
 
 export type TerminalViewProps = {
@@ -25,6 +26,7 @@ export type TerminalViewProps = {
   theme?: ITheme
   options?: ITerminalOptions
   onData?: (data: string) => void
+  onResize?: (size: { cols: number; rows: number }) => void
 }
 
 const defaultOptions: ITerminalOptions = {
@@ -38,16 +40,21 @@ const defaultOptions: ITerminalOptions = {
 }
 
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
-  function TerminalView({ className, ariaLabel, theme, options, onData }, ref) {
+  function TerminalView({ className, ariaLabel, theme, options, onData, onResize }, ref) {
     const containerRef = useRef<HTMLDivElement | null>(null)
     const terminalRef = useRef<XTerm | null>(null)
     const fitAddonRef = useRef<FitAddon | null>(null)
     const resizeObserverRef = useRef<ResizeObserver | null>(null)
     const onDataRef = useRef<TerminalViewProps['onData']>(onData)
+    const onResizeRef = useRef<TerminalViewProps['onResize']>(onResize)
 
     useEffect(() => {
       onDataRef.current = onData
     }, [onData])
+
+    useEffect(() => {
+      onResizeRef.current = onResize
+    }, [onResize])
 
     const initialOptions = useMemo<ITerminalOptions>(() => {
       const mergedTheme = theme ?? options?.theme
@@ -67,6 +74,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       terminal.loadAddon(fitAddon)
 
       terminal.onData((data) => onDataRef.current?.(data))
+      terminal.onResize(({ cols, rows }) => onResizeRef.current?.({ cols, rows }))
 
       terminal.open(container)
 
@@ -125,6 +133,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         reset: () => terminalRef.current?.reset(),
         focus: () => terminalRef.current?.focus(),
         fit: () => fitAddonRef.current?.fit(),
+        getSize: () => ({
+          cols: terminalRef.current?.cols ?? 0,
+          rows: terminalRef.current?.rows ?? 0,
+        }),
       }),
       [],
     )
@@ -138,4 +150,3 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     )
   },
 )
-

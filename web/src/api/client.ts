@@ -24,6 +24,7 @@ import type {
   GitDiffResponse,
   GitLogResponse,
   GitStatusResponse,
+  WriteFileRequest,
 } from '@/api/types'
 
 const API_BASE =
@@ -150,6 +151,8 @@ export const api = {
       http<boolean>(`/api/fs/has-git?path=${encodeURIComponent(path)}`),
     readFile: (path: string) =>
       http<ReadFileResponse>(`/api/fs/file?path=${encodeURIComponent(path)}`),
+    writeFile: (body: WriteFileRequest) =>
+      http<void>(`/api/fs/file`, { method: 'PUT', body: JSON.stringify(body) }),
     deleteEntry: (path: string) =>
       http<void>(`/api/fs/entry?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
     renameEntry: (body: RenameEntryRequest) =>

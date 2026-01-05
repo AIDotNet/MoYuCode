@@ -189,6 +189,11 @@ export type ReadFileResponse = {
   sizeBytes: number
 }
 
+export type WriteFileRequest = {
+  path: string
+  content: string
+}
+
 export type GitStatusEntryDto = {
   path: string
   indexStatus: string

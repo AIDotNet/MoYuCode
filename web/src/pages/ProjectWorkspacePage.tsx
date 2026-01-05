@@ -24,7 +24,7 @@ import { MonacoCode } from '@/components/MonacoCode'
 import { TokenUsageBar, TokenUsageDailyChart } from '@/components/CodexSessionViz'
 import { ProjectFileManager } from '@/components/project-workspace/ProjectFileManager'
 import { ProjectChat } from '@/components/project-workspace/ProjectChat'
-import { TerminalView, type TerminalViewHandle } from '@/components/terminal-kit'
+import { TerminalSession, type TerminalSessionHandle } from '@/components/terminal-kit'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import {
@@ -57,6 +57,10 @@ type FilePreview = {
   content: string
   truncated: boolean
   isBinary: boolean
+  draft: string
+  dirty: boolean
+  saving: boolean
+  saveError: string | null
 }
 
 type DiffPreview = {
@@ -72,6 +76,10 @@ function getBaseName(fullPath: string): string {
   if (lastSeparator < 0) return normalized
   const base = normalized.slice(lastSeparator + 1)
   return base || normalized
+}
+
+function isConfigToml(path: string): boolean {
+  return getBaseName(path).toLowerCase() === 'config.toml'
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -500,12 +508,12 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
   const [detailsPortalTarget, setDetailsPortalTarget] = useState<HTMLDivElement | null>(null)
   const detailsOpen = activeView.kind === 'output'
 
-  const terminalHandleRef = useRef<TerminalViewHandle | null>(null)
-  const terminalBacklogRef = useRef<string[]>([])
-  const terminalFocusRequestedRef = useRef(false)
-  const terminalHasOutputRef = useRef(false)
-  const [terminalHasOutput, setTerminalHasOutput] = useState(false)
+  const terminalSessionRef = useRef<TerminalSessionHandle | null>(null)
   const [terminalCwd, setTerminalCwd] = useState('')
+  const [terminalStatus, setTerminalStatus] = useState<
+    'connecting' | 'connected' | 'closed' | 'error'
+  >('closed')
+  const [terminalStatusError, setTerminalStatusError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (!id) return
@@ -533,11 +541,9 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     setFilePreviewByPath({})
     setDiffPreviewByFile({})
 
-    terminalBacklogRef.current = []
-    terminalHasOutputRef.current = false
-    setTerminalHasOutput(false)
     setTerminalCwd(workspacePath)
-    terminalHandleRef.current?.reset()
+    setTerminalStatus('closed')
+    setTerminalStatusError(null)
   }, [workspacePath])
 
   useEffect(() => {
@@ -559,16 +565,24 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     if (previewInFlightRef.current.has(path)) return
     previewInFlightRef.current.add(path)
 
-    setFilePreviewByPath((prev) => ({
-      ...prev,
-      [path]: {
-        loading: true,
-        error: null,
-        content: prev[path]?.content ?? '',
-        truncated: prev[path]?.truncated ?? false,
-        isBinary: prev[path]?.isBinary ?? false,
-      },
-    }))
+    setFilePreviewByPath((prev) => {
+      const existing = prev[path]
+      const content = existing?.content ?? ''
+      return {
+        ...prev,
+        [path]: {
+          loading: true,
+          error: null,
+          content,
+          truncated: existing?.truncated ?? false,
+          isBinary: existing?.isBinary ?? false,
+          draft: existing?.draft ?? content,
+          dirty: existing?.dirty ?? false,
+          saving: existing?.saving ?? false,
+          saveError: existing?.saveError ?? null,
+        },
+      }
+    })
 
     try {
       const data = await api.fs.readFile(path)
@@ -580,19 +594,31 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
           content: data.content,
           truncated: data.truncated,
           isBinary: data.isBinary,
+          draft: data.content,
+          dirty: false,
+          saving: false,
+          saveError: null,
         },
       }))
     } catch (e) {
-      setFilePreviewByPath((prev) => ({
-        ...prev,
-        [path]: {
-          loading: false,
-          error: (e as Error).message,
-          content: prev[path]?.content ?? '',
-          truncated: prev[path]?.truncated ?? false,
-          isBinary: prev[path]?.isBinary ?? false,
-        },
-      }))
+      setFilePreviewByPath((prev) => {
+        const existing = prev[path]
+        const content = existing?.content ?? ''
+        return {
+          ...prev,
+          [path]: {
+            loading: false,
+            error: (e as Error).message,
+            content,
+            truncated: existing?.truncated ?? false,
+            isBinary: existing?.isBinary ?? false,
+            draft: existing?.draft ?? content,
+            dirty: existing?.dirty ?? false,
+            saving: existing?.saving ?? false,
+            saveError: existing?.saveError ?? null,
+          },
+        }
+      })
     } finally {
       previewInFlightRef.current.delete(path)
     }
@@ -698,33 +724,99 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     setActiveView({ kind: 'panel', panelId: 'project-summary' })
   }, [])
 
-  const markTerminalHasOutput = useCallback(() => {
-    if (terminalHasOutputRef.current) return
-    terminalHasOutputRef.current = true
-    setTerminalHasOutput(true)
-  }, [])
+  const updateFileDraft = useCallback((path: string, draft: string) => {
+    setFilePreviewByPath((prev) => {
+      const existing = prev[path]
+      if (!existing) return prev
+      if (existing.isBinary || existing.truncated) return prev
 
-  const appendTerminalOutput = useCallback(
-    (chunk: string) => {
-      if (!chunk) return
-      markTerminalHasOutput()
-
-      terminalBacklogRef.current.push(chunk)
-      if (terminalBacklogRef.current.length > 2000) {
-        terminalBacklogRef.current.splice(0, terminalBacklogRef.current.length - 2000)
+      const nextDirty = draft !== existing.content
+      return {
+        ...prev,
+        [path]: {
+          ...existing,
+          draft,
+          dirty: nextDirty,
+          saveError: null,
+        },
       }
-
-      terminalHandleRef.current?.write(chunk)
-    },
-    [markTerminalHasOutput],
-  )
-
-  const clearTerminal = useCallback(() => {
-    terminalBacklogRef.current = []
-    terminalHasOutputRef.current = false
-    setTerminalHasOutput(false)
-    terminalHandleRef.current?.reset()
+    })
   }, [])
+
+  const revertFileDraft = useCallback((path: string) => {
+    setFilePreviewByPath((prev) => {
+      const existing = prev[path]
+      if (!existing) return prev
+      return {
+        ...prev,
+        [path]: {
+          ...existing,
+          draft: existing.content,
+          dirty: false,
+          saveError: null,
+        },
+      }
+    })
+  }, [])
+
+  const saveFileDraft = useCallback(
+    async (path: string) => {
+      const preview = filePreviewByPath[path]
+      if (!preview) return
+      if (!isConfigToml(path)) return
+      if (preview.saving) return
+      if (preview.isBinary || preview.truncated) return
+      if (!preview.dirty) return
+
+      const content = preview.draft ?? ''
+
+      setFilePreviewByPath((prev) => {
+        const existing = prev[path]
+        if (!existing) return prev
+        return {
+          ...prev,
+          [path]: {
+            ...existing,
+            saving: true,
+            saveError: null,
+          },
+        }
+      })
+
+      try {
+        await api.fs.writeFile({ path, content })
+        setFilePreviewByPath((prev) => {
+          const existing = prev[path]
+          if (!existing) return prev
+          return {
+            ...prev,
+            [path]: {
+              ...existing,
+              content,
+              draft: content,
+              dirty: false,
+              saving: false,
+              saveError: null,
+            },
+          }
+        })
+      } catch (e) {
+        setFilePreviewByPath((prev) => {
+          const existing = prev[path]
+          if (!existing) return prev
+          return {
+            ...prev,
+            [path]: {
+              ...existing,
+              saving: false,
+              saveError: (e as Error).message,
+            },
+          }
+        })
+      }
+    },
+    [filePreviewByPath],
+  )
 
   const openExternalTerminal = useCallback(async (path: string) => {
     const normalized = path.trim()
@@ -736,26 +828,6 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     }
   }, [])
 
-  const setTerminalHandle = useCallback((handle: TerminalViewHandle | null) => {
-    terminalHandleRef.current = handle
-    if (!handle) return
-
-    const backlog = terminalBacklogRef.current
-    if (backlog.length) {
-      handle.reset()
-      for (const chunk of backlog) {
-        handle.write(chunk)
-      }
-    }
-
-    if (terminalFocusRequestedRef.current) {
-      terminalFocusRequestedRef.current = false
-      handle.focus()
-    }
-
-    handle.fit()
-  }, [])
-
   const openTerminal = useCallback(
     (opts?: { path?: string; focus?: boolean }) => {
       const nextPath = (opts?.path ?? terminalCwd ?? workspacePath).trim()
@@ -765,8 +837,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
       setActiveView({ kind: 'terminal' })
 
       if (opts?.focus) {
-        terminalFocusRequestedRef.current = true
-        window.setTimeout(() => terminalHandleRef.current?.focus(), 0)
+        window.setTimeout(() => terminalSessionRef.current?.focus(), 0)
       }
     },
     [terminalCwd, workspacePath],
@@ -869,7 +940,9 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
   const mainTabs = useMemo(() => {
     return tabs.map((tab) => {
       if (tab.kind === 'file') {
-        return { ...tab, key: getTabKey(tab), label: getBaseName(tab.path), title: tab.path }
+        const dirty = Boolean(filePreviewByPath[tab.path]?.dirty)
+        const label = dirty ? `${getBaseName(tab.path)}*` : getBaseName(tab.path)
+        return { ...tab, key: getTabKey(tab), label, title: tab.path }
       }
 
       if (tab.kind === 'diff') {
@@ -888,7 +961,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
         title: tab.panelId === 'project-summary' ? '项目数据汇总' : tab.panelId,
       }
     })
-  }, [tabs])
+  }, [filePreviewByPath, tabs])
 
   const renderMain = () => {
     if (activeView.kind === 'panel') {
@@ -914,18 +987,32 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
 
     if (activeView.kind === 'terminal') {
       const cwd = terminalCwd.trim() || workspacePath
+      const statusLabel =
+        terminalStatus === 'connected'
+          ? '已连接'
+          : terminalStatus === 'connecting'
+            ? '连接中…'
+            : terminalStatus === 'error'
+              ? '连接错误'
+              : '未连接'
       return (
         <div className="h-full min-h-0 overflow-hidden flex flex-col">
           <div className="shrink-0 border-b px-3 py-2">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-sm font-medium">Terminal</div>
+                <div className="flex items-center gap-2">
+                  <div className="text-sm font-medium">Terminal</div>
+                  <div className="text-[11px] text-muted-foreground">{statusLabel}</div>
+                </div>
                 <div
                   className="mt-0.5 truncate text-[11px] text-muted-foreground"
                   title={cwd}
                 >
                   {cwd || '（未设置工作目录）'}
                 </div>
+                {terminalStatusError ? (
+                  <div className="mt-1 text-xs text-destructive">{terminalStatusError}</div>
+                ) : null}
               </div>
 
               <div className="flex items-center gap-2">
@@ -933,10 +1020,18 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={!terminalHasOutput}
-                  onClick={clearTerminal}
+                  disabled={!cwd}
+                  onClick={() => terminalSessionRef.current?.restart()}
                 >
-                  清空
+                  重启
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => terminalSessionRef.current?.clear()}
+                >
+                  清屏
                 </Button>
                 <Button
                   type="button"
@@ -951,21 +1046,18 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
             </div>
           </div>
 
-          <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
-            <TerminalView
-              ref={setTerminalHandle}
-              className="h-full"
+          <div className="min-h-0 flex-1 overflow-hidden bg-black">
+            <TerminalSession
+              ref={terminalSessionRef}
+              cwd={cwd}
               ariaLabel="Project terminal"
-              options={{ disableStdin: true, cursorBlink: false }}
+              options={{ cursorBlink: true }}
+              autoFocus
+              onStatusChange={(status, err) => {
+                setTerminalStatus(status)
+                setTerminalStatusError(err ?? null)
+              }}
             />
-            {!terminalHasOutput ? (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center">
-                <div className="max-w-sm text-xs text-muted-foreground">
-                  这里会显示 Codex / Claude Code 的工具输出（命令执行日志）。开始一次对话或运行工具后，
-                  输出会自动流入。
-                </div>
-              </div>
-            ) : null}
           </div>
         </div>
       )
@@ -1041,6 +1133,9 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
         )
       }
 
+      const canEdit = isConfigToml(activeView.path) && !preview.truncated
+      const dirty = Boolean(preview.dirty)
+
       return (
         <div className="h-full min-h-0 overflow-hidden flex flex-col">
           {preview.truncated ? (
@@ -1048,8 +1143,59 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
               内容已截断（仅展示前一部分）。
             </div>
           ) : null}
+          {canEdit ? (
+            <div className="shrink-0 border-b px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">
+                    {getBaseName(activeView.path)}
+                    {dirty ? '（未保存）' : ''}
+                  </div>
+                  <div
+                    className="mt-0.5 truncate text-[11px] text-muted-foreground"
+                    title={activeView.path}
+                  >
+                    {activeView.path}
+                  </div>
+                  {preview.saveError ? (
+                    <div className="mt-1 text-xs text-destructive">{preview.saveError}</div>
+                  ) : null}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!dirty || preview.saving}
+                    onClick={() => void saveFileDraft(activeView.path)}
+                  >
+                    保存
+                    {preview.saving ? <Spinner /> : null}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!dirty || preview.saving}
+                    onClick={() => revertFileDraft(activeView.path)}
+                  >
+                    还原
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <div className="min-h-0 flex-1 overflow-hidden">
-            {preview.content ? (
+            {canEdit ? (
+              <MonacoCode
+                code={preview.draft}
+                filePath={activeView.path}
+                className="h-full"
+                readOnly={false}
+                onChange={(value) => updateFileDraft(activeView.path, value)}
+              />
+            ) : preview.content ? (
               <MonacoCode code={preview.content} filePath={activeView.path} className="h-full" />
             ) : (
               <div className="px-4 py-4 text-xs text-muted-foreground">（空文件）</div>
@@ -1100,7 +1246,6 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
               project={project}
               detailsOpen={detailsOpen}
               detailsPortalTarget={detailsPortalTarget}
-              onToolOutput={appendTerminalOutput}
             />
           ) : (
             <div className="min-h-0 flex-1 overflow-hidden p-4 text-sm text-muted-foreground">

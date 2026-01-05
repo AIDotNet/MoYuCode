@@ -61,11 +61,15 @@ export function MonacoCode({
   filePath,
   language,
   className,
+  readOnly = true,
+  onChange,
 }: {
   code: string
   filePath?: string
   language?: string
   className?: string
+  readOnly?: boolean
+  onChange?: (value: string) => void
 }) {
   ensureMonacoEnvironment()
   const { resolvedTheme } = useTheme()
@@ -94,6 +98,10 @@ export function MonacoCode({
         path={modelPath}
         saveViewState
         theme={theme}
+        onChange={(value) => {
+          if (readOnly) return
+          onChange?.(value ?? '')
+        }}
         loading={
           <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
             <span className="inline-flex items-center gap-2">
@@ -102,8 +110,8 @@ export function MonacoCode({
           </div>
         }
         options={{
-          readOnly: true,
-          domReadOnly: true,
+          readOnly,
+          domReadOnly: readOnly,
           automaticLayout: true,
           minimap: { enabled: false },
           scrollBeyondLastLine: false,
