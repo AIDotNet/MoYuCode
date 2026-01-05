@@ -674,7 +674,7 @@ export function ProjectFileManager({
     }
 
     return (
-      <Files className="h-full">
+      <Files className="h-full overflow-auto">
         {rootEntries.directories.map(renderDirectory)}
         {rootEntries.files.map(renderFile)}
       </Files>
