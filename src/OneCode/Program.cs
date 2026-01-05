@@ -24,8 +24,8 @@ builder.Services.AddCors(options =>
 });
 
 var appDataRoot = Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-    "OneCode");
+    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+    ".one-code");
 Directory.CreateDirectory(appDataRoot);
 var dbPath = Path.Combine(appDataRoot, "onecode.sqlite");
 
