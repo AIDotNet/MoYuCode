@@ -3,3 +3,10 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
+artifacts/
+.tmpbuild/
+web/node_modules/
+web/dist/
+src/OneCode/wwwroot/
+/artifacts
+/src/OneCode/wwwroot

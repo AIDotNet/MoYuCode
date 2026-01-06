@@ -198,6 +198,7 @@ function buildVscodeIconImg(url: string | null | undefined): ReactNode | undefin
 
 export function ProjectFileManager({
   workspacePath,
+  projectId,
   className,
   onRequestClose,
   onOpenFile,
@@ -205,10 +206,11 @@ export function ProjectFileManager({
   onOpenTerminal,
 }: {
   workspacePath: string
+  projectId?: string | null
   className?: string
   onRequestClose: () => void
   onOpenFile?: (path: string) => void
-  onOpenDiff?: (file: string) => void
+  onOpenDiff?: (file: string, opts?: { staged?: boolean }) => void
   onOpenTerminal?: (path: string) => void
 }) {
   const [activeTab, setActiveTab] = useState<ProjectFileManagerTabKey>('files')
@@ -674,10 +676,12 @@ export function ProjectFileManager({
     }
 
     return (
-      <Files className="h-full overflow-auto">
-        {rootEntries.directories.map(renderDirectory)}
-        {rootEntries.files.map(renderFile)}
-      </Files>
+      <div className="h-full overflow-auto">
+        <Files>
+          {rootEntries.directories.map(renderDirectory)}
+          {rootEntries.files.map(renderFile)}
+        </Files>
+      </div>
     )
   }, [nodeErrorByPath, nodeLoadingByPath, renderDirectory, renderFile, rootEntries, rootPath])
 
@@ -690,8 +694,10 @@ export function ProjectFileManager({
       )
     }
 
-    return <ProjectCommitPanel workspacePath={workspacePath} onOpenDiff={onOpenDiff} />
-  }, [hasGit, onOpenDiff, workspacePath])
+    return (
+      <ProjectCommitPanel workspacePath={workspacePath} projectId={projectId} onOpenDiff={onOpenDiff} />
+    )
+  }, [hasGit, onOpenDiff, projectId, workspacePath])
 
   return (
     <>
@@ -707,7 +713,7 @@ export function ProjectFileManager({
         onRequestClose={onRequestClose}
         filesView={
           <div
-            className="min-h-0 flex-1 overflow-hidden"
+            className="h-full min-h-0 overflow-hidden"
             onContextMenu={(e) => {
               if (!rootPath) return
               openFsMenu(e, {

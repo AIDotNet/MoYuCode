@@ -9,7 +9,13 @@ import {
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, formatUtc } from '@/api/client'
-import type { ProjectDto, ProjectSessionDto, ToolStatusDto, ToolType } from '@/api/types'
+import type {
+  ProjectDto,
+  ProjectSessionDto,
+  ToolKey,
+  ToolStatusDto,
+  ToolType,
+} from '@/api/types'
 import { cn } from '@/lib/utils'
 import { SessionTraceBar, TokenUsageColumnChart } from '@/components/CodexSessionViz'
 import { Modal } from '@/components/Modal'
@@ -32,7 +38,65 @@ import { Spinner } from '@/components/ui/spinner'
 import { ProjectWorkspacePage, type ProjectWorkspaceHandle } from '@/pages/ProjectWorkspacePage'
 import { FileText, Folder, RefreshCw, Terminal, X } from 'lucide-react'
 
-const SELECTED_PROJECT_STORAGE_KEY = 'onecode:code:selected-project-id:v1'
+type CodePageMode = 'all' | 'codex' | 'claude'
+
+type CodePageConfig = {
+  toolTypes: ToolType[]
+  primaryToolType: ToolType
+  primaryToolKey: ToolKey
+  primaryToolLabel: string
+  selectedProjectStorageKey: string
+  routePath: string
+  installRoute: string
+  scanCommandLabel: string
+  scanTooltip: string
+  openConfigLabel: string
+}
+
+function getCodePageConfig(mode: CodePageMode): CodePageConfig {
+  if (mode === 'claude') {
+    return {
+      toolTypes: ['ClaudeCode'],
+      primaryToolType: 'ClaudeCode',
+      primaryToolKey: 'claude',
+      primaryToolLabel: 'Claude Code',
+      selectedProjectStorageKey: 'onecode:claude:selected-project-id:v1',
+      routePath: '/claude',
+      installRoute: '/claude/tool',
+      scanCommandLabel: 'claude --version',
+      scanTooltip: '扫描 Claude projects 并创建项目',
+      openConfigLabel: '打开 settings.json',
+    }
+  }
+
+  if (mode === 'codex') {
+    return {
+      toolTypes: ['Codex'],
+      primaryToolType: 'Codex',
+      primaryToolKey: 'codex',
+      primaryToolLabel: 'Codex',
+      selectedProjectStorageKey: 'onecode:code:selected-project-id:v1',
+      routePath: '/code',
+      installRoute: '/codex',
+      scanCommandLabel: 'codex -V',
+      scanTooltip: '扫描 Codex sessions 并创建项目',
+      openConfigLabel: '打开 config.toml',
+    }
+  }
+
+  return {
+    toolTypes: ['Codex', 'ClaudeCode'],
+    primaryToolType: 'Codex',
+    primaryToolKey: 'codex',
+    primaryToolLabel: 'Codex',
+    selectedProjectStorageKey: 'onecode:code:selected-project-id:v1',
+    routePath: '/code',
+    installRoute: '/codex',
+    scanCommandLabel: 'codex -V',
+    scanTooltip: '扫描 Codex sessions 并创建项目',
+    openConfigLabel: '打开 config.toml',
+  }
+}
 
 type SessionsCacheEntry = {
   cachedAt: number
@@ -90,26 +154,26 @@ function formatCompactNumber(value: number): string {
   return `${sign}${stripTrailingZero(n.toFixed(decimals))}B`
 }
 
-function readStoredProjectId(): string | null {
+function readStoredProjectId(storageKey: string): string | null {
   try {
-    const v = localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY)
+    const v = localStorage.getItem(storageKey)
     return v ? v : null
   } catch {
     return null
   }
 }
 
-function writeStoredProjectId(id: string) {
+function writeStoredProjectId(storageKey: string, id: string) {
   try {
-    localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, id)
+    localStorage.setItem(storageKey, id)
   } catch {
     // ignore
   }
 }
 
-function clearStoredProjectId() {
+function clearStoredProjectId(storageKey: string) {
   try {
-    localStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY)
+    localStorage.removeItem(storageKey)
   } catch {
     // ignore
   }
@@ -133,8 +197,9 @@ function mergeProjects(a: ProjectDto[], b: ProjectDto[]): ProjectDto[] {
   return merged
 }
 
-export function CodePage() {
+export function CodePage({ mode = 'all' }: { mode?: CodePageMode } = {}) {
   const navigate = useNavigate()
+  const config = useMemo(() => getCodePageConfig(mode), [mode])
   const [searchParams, setSearchParams] = useSearchParams()
 
   const projectIdFromQuery = normalizeProjectQueryId(
@@ -146,7 +211,7 @@ export function CodePage() {
   const [initialLoadDone, setInitialLoadDone] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [codexStatus, setCodexStatus] = useState<ToolStatusDto | null>(null)
+  const [toolStatus, setToolStatus] = useState<ToolStatusDto | null>(null)
 
   const [scanning, setScanning] = useState(false)
   const [scanLogs, setScanLogs] = useState<string[]>([])
@@ -176,6 +241,14 @@ export function CodePage() {
   >(null)
   const closeActionsMenu = useCallback(() => setActionsMenuOpen(false), [])
 
+  const [sessionsMenuOpen, setSessionsMenuOpen] = useState(false)
+  const sessionsAnchorRef = useRef<HTMLButtonElement | null>(null)
+  const sessionsMenuRef = useRef<HTMLDivElement | null>(null)
+  const [sessionsMenuPos, setSessionsMenuPos] = useState<
+    { top: number; left: number; width: number } | null
+  >(null)
+  const closeSessionsMenu = useCallback(() => setSessionsMenuOpen(false), [])
+
   const [upsertOpen, setUpsertOpen] = useState(false)
   const [upsertMode, setUpsertMode] = useState<'create' | 'edit'>('create')
   const [upsertTarget, setUpsertTarget] = useState<ProjectDto | null>(null)
@@ -197,19 +270,33 @@ export function CodePage() {
       if (next) {
         closePicker()
         closeProjectMenu()
+        closeSessionsMenu()
       }
       return next
     })
-  }, [closePicker, closeProjectMenu])
+  }, [closePicker, closeProjectMenu, closeSessionsMenu])
+
+  const toggleSessionsMenu = useCallback(() => {
+    setSessionsMenuOpen((open) => {
+      const next = !open
+      if (next) {
+        closeActionsMenu()
+        closePicker()
+        closeProjectMenu()
+      }
+      return next
+    })
+  }, [closeActionsMenu, closePicker, closeProjectMenu])
 
   const openCreateProject = useCallback(() => {
     closeActionsMenu()
+    closeSessionsMenu()
     closePicker()
     closeProjectMenu()
     setUpsertMode('create')
     setUpsertTarget(null)
     setUpsertOpen(true)
-  }, [closeActionsMenu, closePicker, closeProjectMenu])
+  }, [closeActionsMenu, closePicker, closeProjectMenu, closeSessionsMenu])
 
   useEffect(() => {
     return () => {
@@ -292,32 +379,83 @@ export function CodePage() {
     }
   }, [actionsMenuOpen, closeActionsMenu])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    if (!sessionsMenuOpen) {
+      setSessionsMenuPos(null)
+      return
+    }
+
+    const anchor = sessionsAnchorRef.current
+    if (!anchor) return
+
+    const update = () => {
+      const rect = anchor.getBoundingClientRect()
+      const width = Math.min(380, Math.max(0, window.innerWidth - 16))
+      const maxLeft = Math.max(8, window.innerWidth - width - 8)
+      setSessionsMenuPos({
+        top: rect.bottom + 6,
+        left: Math.min(rect.left, maxLeft),
+        width,
+      })
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Element | null
+      if (!target) return
+      const menu = sessionsMenuRef.current
+      if (menu && menu.contains(target)) return
+      if (anchor.contains(target)) return
+      closeSessionsMenu()
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeSessionsMenu()
+    }
+
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [closeSessionsMenu, sessionsMenuOpen])
+
   const loadProjects = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const toolTypes: ToolType[] = ['Codex', 'ClaudeCode']
-      const [codex, claude] = await Promise.all(toolTypes.map((t) => api.projects.list(t)))
-      setProjects(mergeProjects(codex, claude))
+      const lists = await Promise.all(config.toolTypes.map((t) => api.projects.list(t)))
+      const merged = lists.reduce<ProjectDto[]>(
+        (acc, cur) => mergeProjects(acc, cur),
+        [],
+      )
+      setProjects(merged)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setLoading(false)
       setInitialLoadDone(true)
     }
-  }, [])
+  }, [config.toolTypes])
 
-  const loadCodexStatus = useCallback(async (): Promise<ToolStatusDto | null> => {
+  const loadToolStatus = useCallback(async (): Promise<ToolStatusDto | null> => {
     try {
-      const status = await api.tools.status('codex')
-      setCodexStatus(status)
+      const status = await api.tools.status(config.primaryToolKey)
+      setToolStatus(status)
       return status
     } catch (e) {
       setError((e as Error).message)
-      setCodexStatus(null)
+      setToolStatus(null)
       return null
     }
-  }, [])
+  }, [config.primaryToolKey])
 
   const refreshProjectsList = useCallback(() => {
     closeActionsMenu()
@@ -335,16 +473,16 @@ export function CodePage() {
     workspaceRef.current?.openTerminal({ focus: true })
   }, [closeActionsMenu, closeProjectMenu])
 
-  const openCodexConfigToml = useCallback(async () => {
+  const openToolConfigFile = useCallback(async () => {
     closeActionsMenu()
     try {
-      const status = await loadCodexStatus()
+      const status = await loadToolStatus()
       if (!status) return
       workspaceRef.current?.openFile(status.configPath)
     } catch (e) {
       setError((e as Error).message)
     }
-  }, [closeActionsMenu, loadCodexStatus])
+  }, [closeActionsMenu, loadToolStatus])
 
   const appendScanLog = useCallback((line: string) => {
     setScanLogs((prev) => {
@@ -376,17 +514,19 @@ export function CodePage() {
     scanEventSourceRef.current?.close()
     scanEventSourceRef.current = null
 
-    appendScanLog('执行：codex -V')
-    const status = await loadCodexStatus()
+    appendScanLog(`执行：${config.scanCommandLabel}`)
+    const status = await loadToolStatus()
     if (!status?.installed) {
-      appendScanLog('未检测到 Codex CLI：请先安装 Codex，然后重试。')
+      appendScanLog(
+        `未检测到 ${config.primaryToolLabel} CLI：请先安装 ${config.primaryToolLabel}，然后重试。`,
+      )
       setScanning(false)
       return
     }
 
-    appendScanLog(`Codex 版本：${status.version ?? '—'}`)
+    appendScanLog(`${config.primaryToolLabel} 版本：${status.version ?? '—'}`)
 
-    const eventSource = api.projects.scanCodexSessions('Codex')
+    const eventSource = api.projects.scanCodexSessions(config.primaryToolType)
     scanEventSourceRef.current = eventSource
 
     eventSource.addEventListener('log', (e) => {
@@ -408,16 +548,26 @@ export function CodePage() {
       scanEventSourceRef.current = null
       setScanning(false)
     }
-  }, [appendScanLog, initialLoadDone, loadCodexStatus, loadProjects, projects.length, scanning])
+  }, [
+    appendScanLog,
+    config.primaryToolLabel,
+    config.primaryToolType,
+    config.scanCommandLabel,
+    initialLoadDone,
+    loadProjects,
+    loadToolStatus,
+    projects.length,
+    scanning,
+  ])
 
   useEffect(() => {
     void loadProjects()
-    void loadCodexStatus()
+    void loadToolStatus()
     return () => {
       scanEventSourceRef.current?.close()
       scanEventSourceRef.current = null
     }
-  }, [loadCodexStatus, loadProjects])
+  }, [loadProjects, loadToolStatus])
 
   useEffect(() => {
     void startScan()
@@ -435,6 +585,10 @@ export function CodePage() {
   const [copyResumeHint, setCopyResumeHint] = useState<string | null>(null)
 
   const selectedProjectId = selectedProject?.id ?? null
+
+  useEffect(() => {
+    closeSessionsMenu()
+  }, [closeSessionsMenu, selectedProjectId])
 
   const loadSessions = useCallback(
     async ({ force }: { force?: boolean } = {}) => {
@@ -509,14 +663,20 @@ export function CodePage() {
     if (projectIdFromQuery) return
     if (!projects.length) return
 
-    const stored = readStoredProjectId()
+    const stored = readStoredProjectId(config.selectedProjectStorageKey)
     if (!stored) return
     if (!projects.some((p) => p.id === stored)) return
 
     const sp = new URLSearchParams(searchParams)
     sp.set('projects', stored)
     setSearchParams(sp, { replace: true })
-  }, [projectIdFromQuery, projects, searchParams, setSearchParams])
+  }, [
+    config.selectedProjectStorageKey,
+    projectIdFromQuery,
+    projects,
+    searchParams,
+    setSearchParams,
+  ])
 
   useEffect(() => {
     if (!pickerOpen) return
@@ -579,25 +739,37 @@ export function CodePage() {
 
   const selectProject = useCallback(
     (id: string) => {
-      writeStoredProjectId(id)
+      writeStoredProjectId(config.selectedProjectStorageKey, id)
       const sp = new URLSearchParams(searchParams)
       sp.set('projects', id)
       setSearchParams(sp, { replace: false })
       closePicker()
       closeProjectMenu()
     },
-    [closePicker, closeProjectMenu, searchParams, setSearchParams],
+    [
+      closePicker,
+      closeProjectMenu,
+      config.selectedProjectStorageKey,
+      searchParams,
+      setSearchParams,
+    ],
   )
 
   const clearSelection = useCallback(() => {
-    clearStoredProjectId()
+    clearStoredProjectId(config.selectedProjectStorageKey)
     const sp = new URLSearchParams(searchParams)
     sp.delete('projects')
     sp.delete('project')
     setSearchParams(sp, { replace: false })
     closePicker()
     closeProjectMenu()
-  }, [closePicker, closeProjectMenu, searchParams, setSearchParams])
+  }, [
+    closePicker,
+    closeProjectMenu,
+    config.selectedProjectStorageKey,
+    searchParams,
+    setSearchParams,
+  ])
 
   const openProjectMenu = useCallback(
     (e: ReactMouseEvent) => {
@@ -707,17 +879,26 @@ export function CodePage() {
         pickerButtonLabel={pickerButtonLabel}
         onTogglePicker={() => {
           closeActionsMenu()
+          closeSessionsMenu()
           setPickerOpen((v) => !v)
         }}
         onOpenMenu={(e) => {
           closeActionsMenu()
+          closeSessionsMenu()
           openProjectMenu(e)
         }}
+        sessionsAnchorRef={sessionsAnchorRef}
+        sessionsOpen={sessionsMenuOpen}
+        sessionsDisabled={!selectedProject}
+        sessionsLoading={sessionsLoading}
+        sessionsCount={sessions.length}
+        onToggleSessions={toggleSessionsMenu}
         actionsAnchorRef={actionsAnchorRef}
         actionsOpen={actionsMenuOpen}
         onToggleActions={toggleActionsMenu}
         scanning={scanning}
         showScanButton={!projects.length}
+        scanTooltip={config.scanTooltip}
         onScan={() => void startScan({ force: true })}
       />
 
@@ -738,15 +919,19 @@ export function CodePage() {
             projects={projects}
             scanning={scanning}
             scanLogs={scanLogs}
-            codexStatus={codexStatus}
+            toolStatus={toolStatus}
+            toolLabel={config.primaryToolLabel}
+            routePath={config.routePath}
+            scanCommandLabel={config.scanCommandLabel}
+            scanTooltip={config.scanTooltip}
             onSelectProject={selectProject}
             onCreateProject={openCreateProject}
             onScanProjects={() => void startScan({ force: true })}
             onStopScan={stopScan}
-            onGoInstallCodex={() => navigate('/codex')}
+            onGoInstallTool={() => navigate(config.installRoute)}
           />
         ) : (
-          <div className="h-full min-h-0 animate-in fade-in-0 duration-200 overflow-hidden flex flex-col gap-4 lg:flex-row">
+          <div className="h-full min-h-0 animate-in fade-in-0 duration-200 overflow-hidden flex flex-col">
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
               <ProjectWorkspacePage
                 ref={workspaceRef}
@@ -754,8 +939,22 @@ export function CodePage() {
                 projectId={selectedProject.id}
               />
             </div>
+          </div>
+        )}
+      </div>
 
-            <aside className="min-h-0 overflow-hidden rounded-lg border bg-card flex flex-col lg:w-[380px]">
+      {sessionsMenuOpen && sessionsMenuPos && typeof document !== 'undefined'
+        ? createPortal(
+            <div
+              ref={sessionsMenuRef}
+              className="fixed z-50 max-h-[80vh] overflow-hidden rounded-lg border bg-card shadow-md animate-in fade-in-0 zoom-in-95 duration-200 ease-out flex flex-col"
+              style={{
+                top: sessionsMenuPos.top,
+                left: sessionsMenuPos.left,
+                width: sessionsMenuPos.width,
+              }}
+              role="menu"
+            >
               <div className="shrink-0 border-b px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
@@ -883,7 +1082,9 @@ export function CodePage() {
                         </div>
                       </div>
                       <div className="mt-2">
-                        <TokenUsageColumnChart usage={selectedSession.tokenUsage} />
+                        <TokenUsageColumnChart
+                          usage={selectedSession.tokenUsage}
+                        />
                       </div>
                     </div>
 
@@ -906,7 +1107,7 @@ export function CodePage() {
                       </div>
                     ) : null}
 
-                    {selectedProject.toolType === 'Codex' ? (
+                    {selectedProject?.toolType === 'Codex' ? (
                       <div className="rounded-md border bg-background/40 p-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-xs font-medium text-muted-foreground">
@@ -950,14 +1151,14 @@ export function CodePage() {
                   </div>
                 ) : (
                   <div className="shrink-0 border-t p-3 text-sm text-muted-foreground">
-                    请选择右侧会话以查看记录；不选择则保持当前工作区对话为新会话。
+                    请选择上方会话以查看记录；不选择则保持当前工作区对话为新会话。
                   </div>
                 )}
               </div>
-            </aside>
-          </div>
-        )}
-      </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {actionsMenuOpen && actionsMenuPos && typeof document !== 'undefined'
         ? createPortal(
@@ -1014,10 +1215,10 @@ export function CodePage() {
                 type="button"
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
                 disabled={!selectedProject}
-                onClick={() => void openCodexConfigToml()}
+                onClick={() => void openToolConfigFile()}
               >
                 <FileText className="size-4 text-muted-foreground" />
-                打开 config.toml
+                {config.openConfigLabel}
               </button>
             </div>,
             document.body,
@@ -1164,7 +1365,7 @@ export function CodePage() {
         open={upsertOpen}
         mode={upsertMode}
         project={upsertMode === 'edit' ? upsertTarget : null}
-        defaultToolType={selectedProject?.toolType ?? 'Codex'}
+        defaultToolType={selectedProject?.toolType ?? config.primaryToolType}
         onClose={() => {
           setUpsertOpen(false)
           setUpsertTarget(null)

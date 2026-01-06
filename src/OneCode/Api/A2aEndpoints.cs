@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using OneCode.Data;
+using OneCode.Data.Entities;
 using OneCode.Infrastructure;
 using OneCode.Services.A2a;
 
@@ -9,29 +11,31 @@ public static class A2aEndpoints
 {
     public static void MapA2a(this WebApplication app)
     {
-        app.MapGet("/.well-known/agent.json", (HttpContext httpContext) =>
+        var api = app.MapGroup("/api");
+
+        api.MapGet("/.well-known/agent.json", (HttpContext httpContext) =>
         {
             return Results.Json(BuildAgentCard(httpContext),JsonOptions.DefaultOptions);
         });
 
         // Optional compatibility: some clients prepend the A2A base path.
-        app.MapGet("/a2a/.well-known/agent.json", (HttpContext httpContext) =>
+        api.MapGet("/a2a/.well-known/agent.json", (HttpContext httpContext) =>
         {
             return Results.Json(BuildAgentCard(httpContext),JsonOptions.DefaultOptions);
         });
 
-        app.MapPost("/a2a", HandleJsonRpcAsync);
+        api.MapPost("/a2a", HandleJsonRpcAsync);
     }
 
     private static object BuildAgentCard(HttpContext httpContext)
     {
         var baseUrl = $"{httpContext.Request.Scheme}://{httpContext.Request.Host}";
-        var a2aUrl = $"{baseUrl}/a2a";
+        var a2aUrl = $"{baseUrl}/api/a2a";
 
         return new
         {
-            name = "OneCode Codex Agent",
-            description = "Codex-backed agent (codex app-server) with full event streaming.",
+            name = "OneCode Agent",
+            description = "Codex / Claude Code agent via A2A (JSON-RPC + SSE).",
             version = "0.0.1",
             capabilities = new
             {
@@ -61,6 +65,15 @@ public static class A2aEndpoints
                     inputModes = new[] { "text/plain" },
                     outputModes = new[] { "text/plain", "application/json" },
                 },
+                new
+                {
+                    id = "claude-chat",
+                    name = "Claude Code Chat",
+                    description = "Claude Code-backed coding assistant with streamed messages and tool output.",
+                    tags = new[] { "coding", "chat", "claude" },
+                    inputModes = new[] { "text/plain" },
+                    outputModes = new[] { "text/plain", "application/json" },
+                },
             },
             supportsAuthenticatedExtendedCard = false,
         };
@@ -69,6 +82,7 @@ public static class A2aEndpoints
     private static async Task<IResult> HandleJsonRpcAsync(
         HttpContext httpContext,
         A2aTaskManager a2aTaskManager,
+        JsonDataStore store,
         CancellationToken cancellationToken)
     {
         using var doc = await JsonDocument.ParseAsync(httpContext.Request.Body, cancellationToken: cancellationToken);
@@ -95,6 +109,7 @@ public static class A2aEndpoints
                 hasRequestId,
                 @params,
                 a2aTaskManager,
+                store,
                 cancellationToken);
             return Results.Empty;
         }
@@ -139,6 +154,7 @@ public static class A2aEndpoints
         bool hasRequestId,
         JsonElement @params,
         A2aTaskManager a2aTaskManager,
+        JsonDataStore store,
         CancellationToken cancellationToken)
     {
         var response = httpContext.Response;
@@ -157,9 +173,63 @@ public static class A2aEndpoints
             return await TrySendSseAsync(writer, JsonSerializer.Serialize(payload, jsonOptions), eventId: null, cancellationToken);
         }
 
-        var cwd = ReadString(@params, "cwd")
+        string? cwd = ReadString(@params, "cwd")
             ?? ReadString(@params, "workspacePath")
             ?? ReadString(@params, "rootPath");
+
+        var toolType = ToolType.Codex;
+        string? model = null;
+        var modelOverride = ReadString(@params, "model");
+        string? providerAddress = null;
+        string? providerApiKey = null;
+
+        var projectIdRaw = ReadString(@params, "projectId")
+            ?? ReadString(@params, "projectID")
+            ?? ReadString(@params, "project");
+
+        if (!string.IsNullOrWhiteSpace(projectIdRaw))
+        {
+            if (!Guid.TryParse(projectIdRaw.Trim(), out var projectId))
+            {
+                await TrySendErrorAsync(code: -32602, message: "Invalid params.projectId");
+                return;
+            }
+
+            var project = store.GetProjectWithProvider(projectId);
+
+            if (project is null)
+            {
+                await TrySendErrorAsync(code: -32602, message: "Project not found.");
+                return;
+            }
+
+            cwd = project.WorkspacePath;
+            toolType = project.ToolType;
+            model = project.Model;
+
+            if (project.Provider is not null)
+            {
+                providerAddress = project.Provider.Address;
+                providerApiKey = project.Provider.ApiKey;
+
+                if (toolType == ToolType.Codex && project.Provider.RequestType == ProviderRequestType.Anthropic)
+                {
+                    await TrySendErrorAsync(code: -32602, message: "Codex projects do not support Anthropic providers.");
+                    return;
+                }
+
+                if (toolType == ToolType.ClaudeCode && project.Provider.RequestType != ProviderRequestType.Anthropic)
+                {
+                    await TrySendErrorAsync(code: -32602, message: "Claude Code projects require an Anthropic-compatible provider.");
+                    return;
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(modelOverride))
+        {
+            model = modelOverride.Trim();
+        }
 
         if (string.IsNullOrWhiteSpace(cwd))
         {
@@ -195,7 +265,11 @@ public static class A2aEndpoints
                 UserText: userText,
                 UserImages: userImages,
                 UserMessageId: userMessageId,
-                AgentMessageId: agentMessageId),
+                AgentMessageId: agentMessageId,
+                ToolType: toolType,
+                Model: model,
+                ProviderAddress: providerAddress,
+                ProviderApiKey: providerApiKey),
             cancellationToken);
 
         await StreamTaskEventsAsync(

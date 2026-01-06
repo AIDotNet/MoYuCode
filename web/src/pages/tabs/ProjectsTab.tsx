@@ -24,6 +24,13 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { ProjectSessionsView } from '@/pages/tabs/ProjectSessionsView'
 
 type FormState = {
@@ -47,6 +54,8 @@ type BatchFormState = {
 function emptyBatchForm(): BatchFormState {
   return { updateProvider: false, providerId: null, updateModel: false, model: '' }
 }
+
+const providerDefaultSentinel = '__onecode_provider_default__'
 
 export function ProjectsTab({ toolType }: { toolType: ToolType }) {
   const navigate = useNavigate()
@@ -905,23 +914,27 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
               <div className="text-xs text-muted-foreground">
                 绑定提供商（可选）
               </div>
-              <select
-                className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                value={form.providerId ?? ''}
-                onChange={(e) =>
+              <Select
+                value={form.providerId ?? providerDefaultSentinel}
+                onValueChange={(value) =>
                   setForm((s) => ({
                     ...s,
-                    providerId: e.target.value ? e.target.value : null,
+                    providerId: value === providerDefaultSentinel ? null : value,
                   }))
                 }
               >
-                <option value="">默认配置</option>
-                {filteredProviders.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.requestType})
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger className="h-9 w-full bg-background px-3 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={providerDefaultSentinel}>默认配置</SelectItem>
+                  {filteredProviders.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name} ({p.requestType})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               {toolType === 'ClaudeCode' ? (
                 <div className="text-xs text-muted-foreground">
                   Claude Code 仅支持 Anthropic 兼容提供商
@@ -997,27 +1010,33 @@ export function ProjectsTab({ toolType }: { toolType: ToolType }) {
                 />
                 更新提供商
               </label>
-              <select
-                className={cn(
-                  'h-9 w-full rounded-md border bg-background px-3 text-sm',
-                  !batchForm.updateProvider && 'opacity-60',
-                )}
+              <Select
+                value={batchForm.providerId ?? providerDefaultSentinel}
                 disabled={!batchForm.updateProvider}
-                value={batchForm.providerId ?? ''}
-                onChange={(e) =>
+                onValueChange={(value) =>
                   setBatchForm((s) => ({
                     ...s,
-                    providerId: e.target.value ? e.target.value : null,
+                    providerId: value === providerDefaultSentinel ? null : value,
                   }))
                 }
               >
-                <option value="">默认配置</option>
-                {filteredProviders.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.requestType})
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger
+                  className={cn(
+                    'h-9 w-full bg-background px-3 text-sm',
+                    !batchForm.updateProvider && 'opacity-60',
+                  )}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={providerDefaultSentinel}>默认配置</SelectItem>
+                  {filteredProviders.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name} ({p.requestType})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               {toolType === 'ClaudeCode' ? (
                 <div className="text-xs text-muted-foreground">
                   Claude Code 仅支持 Anthropic 兼容提供商

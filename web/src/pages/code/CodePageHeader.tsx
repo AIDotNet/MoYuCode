@@ -10,11 +10,18 @@ export function CodePageHeader({
   pickerButtonLabel,
   onTogglePicker,
   onOpenMenu,
+  sessionsAnchorRef,
+  sessionsOpen,
+  sessionsDisabled,
+  sessionsLoading,
+  sessionsCount,
+  onToggleSessions,
   actionsAnchorRef,
   actionsOpen,
   onToggleActions,
   scanning,
   showScanButton,
+  scanTooltip,
   onScan,
 }: {
   pickerAnchorRef: RefObject<HTMLButtonElement | null>
@@ -22,11 +29,18 @@ export function CodePageHeader({
   pickerButtonLabel: string
   onTogglePicker: () => void
   onOpenMenu: (e: ReactMouseEvent<HTMLButtonElement>) => void
+  sessionsAnchorRef: RefObject<HTMLButtonElement | null>
+  sessionsOpen: boolean
+  sessionsDisabled: boolean
+  sessionsLoading: boolean
+  sessionsCount: number
+  onToggleSessions: () => void
   actionsAnchorRef: RefObject<HTMLButtonElement | null>
   actionsOpen: boolean
   onToggleActions: () => void
   scanning: boolean
   showScanButton: boolean
+  scanTooltip: string
   onScan: () => void
 }) {
   return (
@@ -58,6 +72,34 @@ export function CodePageHeader({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <Button
+          asChild
+          variant="outline"
+          size="sm"
+          className={cn(
+            'group',
+            sessionsOpen && 'bg-accent text-accent-foreground shadow-sm',
+          )}
+        >
+          <button
+            ref={sessionsAnchorRef}
+            type="button"
+            onClick={onToggleSessions}
+            aria-haspopup="menu"
+            aria-expanded={sessionsOpen}
+            disabled={sessionsDisabled}
+            title={sessionsDisabled ? '选择项目后可查看会话' : '会话列表'}
+          >
+            会话{sessionsCount ? `（${sessionsCount}）` : ''}
+            {sessionsLoading ? <Spinner /> : null}
+            <ChevronDown
+              className={cn(
+                'size-4 shrink-0 text-muted-foreground transition-[transform,color] duration-200 ease-out group-hover:text-current',
+                sessionsOpen && 'rotate-180',
+              )}
+            />
+          </button>
+        </Button>
         <Button asChild variant="outline" size="sm" className="group">
           <button
             ref={actionsAnchorRef}
@@ -83,7 +125,7 @@ export function CodePageHeader({
             size="sm"
             disabled={scanning}
             onClick={onScan}
-            title="扫描 Codex sessions 并创建项目"
+            title={scanTooltip}
           >
             {scanning ? (
               <span className="inline-flex items-center gap-2">

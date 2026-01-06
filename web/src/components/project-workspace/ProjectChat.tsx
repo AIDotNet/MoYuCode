@@ -1,8 +1,33 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from 'react'
 import { createPortal } from 'react-dom'
+import { api } from '@/api/client'
 import type { ProjectDto } from '@/api/types'
+import type { CodeSelection, WorkspaceFileRef } from '@/lib/chatPromptXml'
+import { buildUserPromptWithWorkspaceContext } from '@/lib/chatWorkspaceContextXml'
 import { cn } from '@/lib/utils'
+import { getVscodeFileIconUrl } from '@/lib/vscodeFileIcons'
+import { Modal } from '@/components/Modal'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
 import {
   Tooltip,
@@ -10,11 +35,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/animate-ui/primitives/animate/tooltip'
-import { ChevronDown, Image as ImageIcon, X } from 'lucide-react'
+import { ChevronDown, Eye, EyeOff, Image as ImageIcon, X } from 'lucide-react'
 
 type ChatRole = 'user' | 'agent' | 'system'
 
-type ChatMessageKind = 'text' | 'think'
+type ChatMessageKind = 'text' | 'think' | 'tool'
 
 type ChatImage = {
   id: string
@@ -30,6 +55,7 @@ type ChatMessage = {
   kind: ChatMessageKind
   text: string
   images?: ChatImage[]
+  toolName?: string
 }
 
 type CodexEventLogItem = {
@@ -83,7 +109,7 @@ type TokenUsageArtifact = {
 
 function getApiBase(): string {
   return (
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:5210'
+    ''
   )
 }
 
@@ -97,6 +123,30 @@ function randomId(prefix = 'id'): string {
   }
 
   return `${prefix}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
+}
+
+function createUuid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+      return crypto.randomUUID()
+    }
+  } catch {
+    // fall back
+  }
+
+  try {
+    const buf = new Uint8Array(16)
+    crypto.getRandomValues(buf)
+    // v4
+    buf[6] = (buf[6] & 0x0f) | 0x40
+    buf[8] = (buf[8] & 0x3f) | 0x80
+    const hex = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  } catch {
+    const seed = `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
+    const padded = seed.padEnd(32, '0').slice(0, 32)
+    return `${padded.slice(0, 8)}-${padded.slice(8, 12)}-4${padded.slice(13, 16)}-a${padded.slice(17, 20)}-${padded.slice(20)}`
+  }
 }
 
 type UploadedImageDto = {
@@ -130,7 +180,7 @@ async function uploadImage(
   const form = new FormData()
   form.append('file', file, file.name || 'image')
 
-  const res = await fetch(`${apiBase}/media/images`, {
+  const res = await fetch(`${apiBase}/api/media/images`, {
     method: 'POST',
     body: form,
     signal,
@@ -211,6 +261,263 @@ function readPartsText(parts: unknown[] | undefined): string {
     if (typeof p.text === 'string' && p.text) chunks.push(p.text)
   }
   return chunks.join('')
+}
+
+function truncateInlineText(value: string, maxChars = 140): string {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return normalized.slice(0, Math.max(0, maxChars - 1)) + '…'
+}
+
+type MentionToken = {
+  start: number
+  end: number
+  query: string
+}
+
+type MentionedFile = {
+  fullPath: string
+  relativePath: string
+  baseName: string
+  iconUrl: string | null
+}
+
+type WorkspaceFileIndex = {
+  files: string[]
+  truncated: boolean
+}
+
+const workspaceFileIndexSkipDirs = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.idea',
+  '.vscode',
+  '.vs',
+  'node_modules',
+  'bin',
+  'obj',
+  'dist',
+  '.next',
+  '.vite',
+  '.turbo',
+  '.cache',
+])
+
+const workspaceFileIndexMaxFiles = 2500
+const workspaceFileIndexMaxDirs = 5000
+
+function normalizePathForComparison(path: string): string {
+  return path.replace(/[\\/]+$/, '').toLowerCase()
+}
+
+function getBaseName(fullPath: string): string {
+  const normalized = fullPath.replace(/[\\/]+$/, '')
+  const lastSeparator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+  if (lastSeparator < 0) return normalized
+  const base = normalized.slice(lastSeparator + 1)
+  return base || normalized
+}
+
+function splitPathParts(path: string): string[] {
+  return path.replace(/[\\/]+$/, '').split(/[\\/]+/).filter(Boolean)
+}
+
+function tryGetWorkspaceRelativePath(workspacePath: string, fullPath: string): string | null {
+  const rootParts = splitPathParts(workspacePath)
+  const fileParts = splitPathParts(fullPath)
+
+  if (!rootParts.length || !fileParts.length) return null
+  if (rootParts.length > fileParts.length) return null
+
+  for (let i = 0; i < rootParts.length; i += 1) {
+    if (rootParts[i].toLowerCase() !== fileParts[i].toLowerCase()) return null
+  }
+
+  const relParts = fileParts.slice(rootParts.length)
+  return relParts.length ? relParts.join('/') : null
+}
+
+function tryGetMentionToken(value: string, caret: number): MentionToken | null {
+  const text = value ?? ''
+  const pos = Math.max(0, Math.min(caret, text.length))
+  const at = text.lastIndexOf('@', pos - 1)
+  if (at < 0) return null
+  if (at > 0) {
+    const prev = text[at - 1]
+    // Allow "@file" right after Chinese / punctuation, but avoid triggering inside emails.
+    if (/[A-Za-z0-9._%+-]/.test(prev)) return null
+  }
+
+  const query = text.slice(at + 1, pos)
+  if (/\s/.test(query)) return null
+  return { start: at, end: pos, query }
+}
+
+async function indexWorkspaceFiles(workspacePath: string): Promise<WorkspaceFileIndex> {
+  const root = workspacePath.trim()
+  if (!root) return { files: [], truncated: false }
+
+  const queue: string[] = [root]
+  const visited = new Set<string>()
+  const files: string[] = []
+  let truncated = false
+
+  while (queue.length) {
+    const current = queue.shift()
+    if (!current) break
+
+    const visitKey = normalizePathForComparison(current)
+    if (!visitKey) continue
+    if (visited.has(visitKey)) continue
+    visited.add(visitKey)
+
+    if (visited.size > workspaceFileIndexMaxDirs) {
+      truncated = true
+      break
+    }
+
+    let entries
+    try {
+      entries = await api.fs.listEntries(current)
+    } catch {
+      continue
+    }
+
+    for (const f of entries.files) {
+      files.push(f.fullPath)
+      if (files.length >= workspaceFileIndexMaxFiles) {
+        truncated = true
+        break
+      }
+    }
+
+    if (truncated) break
+
+    for (const d of entries.directories) {
+      if (workspaceFileIndexSkipDirs.has(d.name.toLowerCase())) continue
+      queue.push(d.fullPath)
+    }
+  }
+
+  files.sort((a, b) => a.localeCompare(b))
+  return { files, truncated }
+}
+
+function stringifyToolArgs(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+type CodexToolCallInfo = {
+  callId?: string
+  toolName: string
+  toolArgs: string
+}
+
+function tryExtractCodexToolCall(raw: string, method?: string): CodexToolCallInfo | null {
+  const combined = `${method ?? ''}\n${raw}`.toLowerCase()
+  const mightBeToolCall =
+    combined.includes('function_call') ||
+    combined.includes('custom_tool_call') ||
+    combined.includes('tool_call') ||
+    combined.includes('tooluse') ||
+    combined.includes('tool_use') ||
+    combined.includes('functioncall') ||
+    combined.includes('toolcall') ||
+    combined.includes('mcp')
+
+  if (!mightBeToolCall) return null
+
+  let ev: unknown
+  try {
+    ev = JSON.parse(raw)
+  } catch {
+    return null
+  }
+
+  if (!ev || typeof ev !== 'object') return null
+  const evObj = ev as { params?: unknown }
+  const params = evObj.params
+  const candidates: unknown[] = []
+
+  if (params && typeof params === 'object') {
+    const p = params as Record<string, unknown>
+    candidates.push(p.item, p.call, p.toolCall, p.tool_call, p.tool, p.msg, p)
+  } else {
+    candidates.push(params)
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const c = candidate as Record<string, unknown>
+    const typeRaw = c.type ?? c.kind ?? c.item_type ?? c.itemType
+    const type = typeof typeRaw === 'string' ? typeRaw.toLowerCase() : ''
+
+    const isToolCallType =
+      type === 'function_call' ||
+      type === 'custom_tool_call' ||
+      type === 'tool_call' ||
+      type === 'tool_use' ||
+      type === 'tooluse' ||
+      type === 'mcptoolcall' ||
+      type === 'mcp_tool_call' ||
+      type === 'mcp-tool-call' ||
+      type === 'mcp_tool_call_begin' ||
+      type === 'mcp_tool_call_end'
+
+    const hasNameish =
+      typeof c.name === 'string' ||
+      typeof c.toolName === 'string' ||
+      typeof c.tool_name === 'string' ||
+      typeof c.tool === 'string'
+
+    if (!isToolCallType && !hasNameish) continue
+
+    const invocation =
+      c.invocation && typeof c.invocation === 'object'
+        ? (c.invocation as Record<string, unknown>)
+        : null
+
+    const callId =
+      (typeof c.call_id === 'string' ? c.call_id : undefined) ??
+      (typeof c.callId === 'string' ? c.callId : undefined) ??
+      (typeof c.id === 'string' ? c.id : undefined)
+
+    const server =
+      (typeof c.server === 'string' ? c.server : undefined) ??
+      (invocation && typeof invocation.server === 'string' ? invocation.server : undefined)
+
+    const toolNameBase =
+      (typeof c.name === 'string' ? c.name : undefined) ??
+      (typeof c.toolName === 'string' ? c.toolName : undefined) ??
+      (typeof c.tool_name === 'string' ? c.tool_name : undefined) ??
+      (typeof c.tool === 'string' ? c.tool : undefined) ??
+      (invocation && typeof invocation.tool === 'string' ? invocation.tool : undefined) ??
+      (typeof method === 'string' && method ? method : 'tool')
+
+    const toolName = server && toolNameBase && !toolNameBase.startsWith(`${server}.`)
+      ? `${server}.${toolNameBase}`
+      : toolNameBase
+
+    const argsValue =
+      c.arguments ??
+      c.args ??
+      c.input ??
+      c.parameters ??
+      (invocation ? invocation.arguments : undefined) ??
+      (typeof c.command === 'string' ? { command: c.command } : undefined)
+
+    const toolArgs = stringifyToolArgs(argsValue)
+    return { callId, toolName, toolArgs }
+  }
+
+  return null
 }
 
 function safeNumber(value: number | null | undefined): number {
@@ -393,6 +700,303 @@ function TokenUsagePill({ usage }: { usage: TokenUsageArtifact }) {
   )
 }
 
+type ChatAlign = 'justify-end' | 'justify-start'
+
+type OpenById = Record<string, boolean>
+type SetOpenById = Dispatch<SetStateAction<OpenById>>
+
+function ChatMessageRow({ align, children }: { align: ChatAlign; children: ReactNode }) {
+  return <div className={cn('mx-auto flex w-full max-w-3xl py-1', align)}>{children}</div>
+}
+
+const ChatMessageImages = memo(function ChatMessageImages({ images }: { images: ChatImage[] }) {
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-2">
+      {images.map((img) => (
+        <a
+          key={img.id}
+          href={img.url}
+          target="_blank"
+          rel="noreferrer"
+          className={cn(
+            'block overflow-hidden rounded-md border bg-background/30',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
+          )}
+          title={img.fileName || 'image'}
+        >
+          <img
+            src={img.url}
+            alt={img.fileName || ''}
+            className="block h-auto w-full max-h-[260px] object-contain"
+            loading="lazy"
+          />
+        </a>
+      ))}
+    </div>
+  )
+})
+
+const ChatThinkMessage = memo(function ChatThinkMessage({
+  message,
+  align,
+  open,
+  isActive,
+  onToggle,
+}: {
+  message: ChatMessage
+  align: ChatAlign
+  open: boolean
+  isActive: boolean
+  onToggle: (id: string, defaultOpen: boolean) => void
+}) {
+  return (
+    <ChatMessageRow align={align}>
+      <div className="max-w-[80%] overflow-hidden rounded-lg border bg-muted/30 text-foreground">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            '!h-auto w-full items-center justify-between gap-3 px-3 py-2 text-xs font-medium text-muted-foreground',
+            'hover:bg-accent/40',
+            '!rounded-none',
+          )}
+          aria-expanded={open}
+          aria-controls={`think-${message.id}`}
+          onClick={() => onToggle(message.id, isActive)}
+        >
+          <span className="inline-flex items-center gap-2">
+            <span>思考</span>
+            {isActive ? (
+              <span className="inline-flex items-center gap-1">
+                <Spinner className="size-3" />
+                <span>生成中</span>
+              </span>
+            ) : null}
+          </span>
+          <ChevronDown
+            className={cn(
+              'size-4 shrink-0 transition-transform',
+              open ? 'rotate-0' : '-rotate-90',
+            )}
+          />
+        </Button>
+
+        {open ? (
+          <pre
+            id={`think-${message.id}`}
+            className="px-3 pb-3 text-xs whitespace-pre-wrap break-words"
+          >
+            {message.text}
+          </pre>
+        ) : null}
+      </div>
+    </ChatMessageRow>
+  )
+})
+
+const ChatToolMessage = memo(function ChatToolMessage({
+  message,
+  align,
+  open,
+  onToggle,
+}: {
+  message: ChatMessage
+  align: ChatAlign
+  open: boolean
+  onToggle: (id: string) => void
+}) {
+  const toolName = message.toolName ?? 'tool'
+  const argsPreview = message.text ? truncateInlineText(message.text, 120) : ''
+
+  return (
+    <ChatMessageRow align={align}>
+      <div className="max-w-[80%] overflow-hidden rounded-lg border bg-muted/30 text-foreground">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            '!h-auto w-full items-start justify-between gap-3 px-3 py-2 text-xs font-medium text-muted-foreground',
+            'hover:bg-accent/40',
+            '!rounded-none',
+          )}
+          aria-expanded={open}
+          aria-controls={`tool-${message.id}`}
+          onClick={() => onToggle(message.id)}
+        >
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2">{toolName}</span>
+            {argsPreview ? (
+              <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                {argsPreview}
+              </span>
+            ) : null}
+          </span>
+          <ChevronDown
+            className={cn(
+              'mt-0.5 size-4 shrink-0 transition-transform',
+              open ? 'rotate-0' : '-rotate-90',
+            )}
+          />
+        </Button>
+
+        {open ? (
+          <pre
+            id={`tool-${message.id}`}
+            className="px-3 pb-3 text-xs whitespace-pre-wrap break-words"
+          >
+            {message.text}
+          </pre>
+        ) : null}
+      </div>
+    </ChatMessageRow>
+  )
+})
+
+const ChatTextMessage = memo(function ChatTextMessage({
+  message,
+  align,
+  isActiveAgentMessage,
+  tokenUsage,
+}: {
+  message: ChatMessage
+  align: ChatAlign
+  isActiveAgentMessage: boolean
+  tokenUsage?: TokenUsageArtifact
+}) {
+  const showBubble = Boolean(message.text) || (message.role === 'agent' && isActiveAgentMessage)
+
+  return (
+    <ChatMessageRow align={align}>
+      <div className="max-w-[80%]">
+        {showBubble ? (
+          <div
+            className={cn(
+              'rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
+              message.role === 'user'
+                ? 'bg-primary text-primary-foreground'
+                : message.role === 'agent'
+                  ? 'bg-muted text-foreground'
+                  : 'bg-accent text-accent-foreground',
+            )}
+          >
+            {message.text ? (
+              message.text
+            ) : message.role === 'agent' && isActiveAgentMessage ? (
+              <span className="inline-flex items-center">
+                <Spinner />
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {message.images?.length ? <ChatMessageImages images={message.images} /> : null}
+
+        {tokenUsage ? (
+          <div className={cn('mt-1', align === 'justify-end' ? 'text-right' : '')}>
+            <TokenUsagePill usage={tokenUsage} />
+          </div>
+        ) : null}
+      </div>
+    </ChatMessageRow>
+  )
+})
+
+const ChatMessageList = memo(function ChatMessageList({
+  messages,
+  sending,
+  activeTaskId,
+  activeReasoningMessageId,
+  thinkOpenById,
+  setThinkOpenById,
+  toolOpenById,
+  setToolOpenById,
+  tokenByMessageId,
+}: {
+  messages: ChatMessage[]
+  sending: boolean
+  activeTaskId: string | null
+  activeReasoningMessageId: string | null
+  thinkOpenById: OpenById
+  setThinkOpenById: SetOpenById
+  toolOpenById: OpenById
+  setToolOpenById: SetOpenById
+  tokenByMessageId: Record<string, TokenUsageArtifact>
+}) {
+  const toggleThinkOpen = useCallback(
+    (id: string, defaultOpen: boolean) => {
+      setThinkOpenById((prev) => ({
+        ...prev,
+        [id]: !(prev[id] ?? defaultOpen),
+      }))
+    },
+    [setThinkOpenById],
+  )
+
+  const toggleToolOpen = useCallback(
+    (id: string) => {
+      setToolOpenById((prev) => ({
+        ...prev,
+        [id]: !(prev[id] ?? false),
+      }))
+    },
+    [setToolOpenById],
+  )
+
+  return (
+    <div className="space-y-2">
+      {messages.map((m) => {
+        const align: ChatAlign = m.role === 'user' ? 'justify-end' : 'justify-start'
+        const isActiveAgentMessage =
+          Boolean(sending && activeTaskId) && m.id === `msg-agent-${activeTaskId}`
+        const isActiveThinkMessage =
+          Boolean(sending && activeTaskId && activeReasoningMessageId) &&
+          m.kind === 'think' &&
+          m.id === activeReasoningMessageId
+
+        if (m.kind === 'think') {
+          const open = thinkOpenById[m.id] ?? isActiveThinkMessage
+          return (
+            <ChatThinkMessage
+              key={m.id}
+              message={m}
+              align={align}
+              open={open}
+              isActive={isActiveThinkMessage}
+              onToggle={toggleThinkOpen}
+            />
+          )
+        }
+
+        if (m.kind === 'tool') {
+          const open = toolOpenById[m.id] ?? false
+          return (
+            <ChatToolMessage
+              key={m.id}
+              message={m}
+              align={align}
+              open={open}
+              onToggle={toggleToolOpen}
+            />
+          )
+        }
+
+        const tokenUsage = m.role === 'agent' ? tokenByMessageId[m.id] : undefined
+        return (
+          <ChatTextMessage
+            key={m.id}
+            message={m}
+            align={align}
+            isActiveAgentMessage={isActiveAgentMessage}
+            tokenUsage={tokenUsage}
+          />
+        )
+      })}
+    </div>
+  )
+})
+
 function upsertThinkChunk(
   prev: ChatMessage[],
   thinkMessageId: string,
@@ -418,44 +1022,155 @@ function upsertThinkChunk(
   return next
 }
 
+function insertBeforeMessage(
+  prev: ChatMessage[],
+  anchorMessageId: string,
+  message: ChatMessage,
+): ChatMessage[] {
+  const insertIndex = prev.findIndex((m) => m.id === anchorMessageId)
+  const next = [...prev]
+  if (insertIndex >= 0) {
+    next.splice(insertIndex, 0, message)
+  } else {
+    next.push(message)
+  }
+  return next
+}
+
 export function ProjectChat({
   project,
   detailsOpen,
   detailsPortalTarget,
+  activeFilePath,
+  codeSelection,
+  onClearCodeSelection,
   onToolOutput,
 }: {
   project: ProjectDto
   detailsOpen: boolean
   detailsPortalTarget: HTMLDivElement | null
+  activeFilePath?: string | null
+  codeSelection?: CodeSelection | null
+  onClearCodeSelection?: () => void
   onToolOutput?: (chunk: string) => void
 }) {
   const apiBase = useMemo(() => getApiBase(), [])
-  const sessionIdRef = useRef<string>(randomId('ctx'))
+  const sessionIdRef = useRef<string>(createUuid())
+  const workspacePath = project.workspacePath.trim()
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
   const [sending, setSending] = useState(false)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
+  const [activeReasoningMessageId, setActiveReasoningMessageId] = useState<string | null>(
+    null,
+  )
   const [canceling, setCanceling] = useState(false)
   const [chatError, setChatError] = useState<string | null>(null)
+  const [toolOutput, setToolOutput] = useState('')
+  const [modelOverride, setModelOverride] = useState('')
+  const [providerModelOptions, setProviderModelOptions] = useState<string[]>([])
+  const [providerModelsLoaded, setProviderModelsLoaded] = useState(false)
+  const [customModels, setCustomModels] = useState<string[]>([])
+  const [customModelsLoaded, setCustomModelsLoaded] = useState(false)
+  const [addModelOpen, setAddModelOpen] = useState(false)
+  const [addModelDraft, setAddModelDraft] = useState('')
+  const [addModelError, setAddModelError] = useState<string | null>(null)
+
+  const [mentionToken, setMentionToken] = useState<MentionToken | null>(null)
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0)
+  const [mentionedFiles, setMentionedFiles] = useState<MentionedFile[]>([])
+  const [includeActiveFileInPrompt, setIncludeActiveFileInPrompt] = useState(true)
+
+  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([])
+  const [workspaceFilesTruncated, setWorkspaceFilesTruncated] = useState(false)
+  const [workspaceFilesLoading, setWorkspaceFilesLoading] = useState(false)
+  const [workspaceFilesError, setWorkspaceFilesError] = useState<string | null>(null)
+  const workspaceFilesCacheRef = useRef<{
+    workspacePath: string
+    files: string[]
+    truncated: boolean
+  } | null>(null)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const draftImagesRef = useRef<DraftImage[]>([])
 
   const [thinkOpenById, setThinkOpenById] = useState<Record<string, boolean>>({})
+  const [toolOpenById, setToolOpenById] = useState<Record<string, boolean>>({})
   const [tokenByMessageId, setTokenByMessageId] = useState<Record<string, TokenUsageArtifact>>(
     {},
   )
 
   const [rawEvents, setRawEvents] = useState<CodexEventLogItem[]>([])
+  const addModelSentinel = '__onecode_add_model__'
+  const modelDefaultSentinel = '__onecode_model_default__'
+
+  const customModelStorageKey = useMemo(() => {
+    const providerKey = project.providerId ? project.providerId : 'default'
+    return `onecode:chat:custom-models:v1:${project.toolType}:${providerKey}`
+  }, [project.providerId, project.toolType])
+
+  const modelOverrideStorageKey = useMemo(() => {
+    return `onecode:chat:model-override:v1:${project.id}`
+  }, [project.id])
+
+  const availableModels = useMemo(() => {
+    const seen = new Set<string>()
+    const next: string[] = []
+
+    const add = (raw: string) => {
+      const model = (raw ?? '').trim()
+      if (!model) return
+      const key = model.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      next.push(model)
+    }
+
+    for (const m of providerModelOptions) add(m)
+    for (const m of customModels) add(m)
+
+    return next
+  }, [customModels, providerModelOptions])
 
   useEffect(() => {
     if (!scrollRef.current) return
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [messages])
+
+  useEffect(() => {
+    setModelOverride('')
+
+    if (project.toolType !== 'Codex') return
+    if (typeof window === 'undefined') return
+
+    try {
+      const raw = window.localStorage.getItem(modelOverrideStorageKey) ?? ''
+      setModelOverride(raw.trim())
+    } catch {
+      // ignore
+    }
+  }, [modelOverrideStorageKey, project.toolType])
+
+  useEffect(() => {
+    if (project.toolType !== 'Codex') return
+    if (typeof window === 'undefined') return
+
+    try {
+      const value = modelOverride.trim()
+      if (!value) {
+        window.localStorage.removeItem(modelOverrideStorageKey)
+      } else {
+        window.localStorage.setItem(modelOverrideStorageKey, value)
+      }
+    } catch {
+      // ignore
+    }
+  }, [modelOverride, modelOverrideStorageKey, project.toolType])
 
   useEffect(() => {
     draftImagesRef.current = draftImages
@@ -475,10 +1190,170 @@ export function ProjectChat({
     }
   }, [])
 
+  const mentionMode = Boolean(mentionToken)
+  const activeFileKey = useMemo(
+    () => normalizePathForComparison((activeFilePath ?? '').trim()),
+    [activeFilePath],
+  )
+
+  useEffect(() => {
+    if (!activeFileKey) return
+    setIncludeActiveFileInPrompt(true)
+  }, [activeFileKey])
+
+  useEffect(() => {
+    setWorkspaceFiles([])
+    setWorkspaceFilesTruncated(false)
+    setWorkspaceFilesError(null)
+    setWorkspaceFilesLoading(false)
+    workspaceFilesCacheRef.current = null
+    setMentionedFiles([])
+  }, [workspacePath])
+
+  useEffect(() => {
+    setProviderModelOptions([])
+    setProviderModelsLoaded(false)
+
+    const providerId = project.providerId
+    if (!providerId) {
+      setProviderModelsLoaded(true)
+      return
+    }
+
+    let canceled = false
+    void (async () => {
+      try {
+        const providers = await api.providers.list()
+        if (canceled) return
+        const provider = providers.find((p) => p.id === providerId) ?? null
+        setProviderModelOptions(provider?.models ?? [])
+      } catch {
+        if (!canceled) setProviderModelOptions([])
+      } finally {
+        if (!canceled) setProviderModelsLoaded(true)
+      }
+    })()
+
+    return () => {
+      canceled = true
+    }
+  }, [project.providerId])
+
+  useEffect(() => {
+    setCustomModels([])
+    setCustomModelsLoaded(false)
+
+    try {
+      if (typeof window === 'undefined') return
+
+      const raw = window.localStorage.getItem(customModelStorageKey)
+      if (!raw) return
+
+      const parsed = JSON.parse(raw) as unknown
+      if (!Array.isArray(parsed)) return
+
+      const models = parsed
+        .filter((m): m is string => typeof m === 'string')
+        .map((m) => m.trim())
+        .filter(Boolean)
+
+      setCustomModels(models)
+    } catch {
+      // ignore
+    } finally {
+      setCustomModelsLoaded(true)
+    }
+  }, [customModelStorageKey])
+
+  useEffect(() => {
+    if (project.toolType !== 'Codex') return
+
+    const optionsLoaded = providerModelsLoaded && customModelsLoaded
+    if (!optionsLoaded) return
+
+    const selected = modelOverride.trim()
+    if (!selected) return
+
+    const map = new Map<string, string>()
+    for (const m of availableModels) {
+      map.set(m.toLowerCase(), m)
+    }
+
+    const normalized = map.get(selected.toLowerCase()) ?? null
+    if (!normalized) {
+      setModelOverride('')
+      return
+    }
+
+    if (normalized !== selected) {
+      setModelOverride(normalized)
+    }
+  }, [availableModels, customModelsLoaded, modelOverride, project.toolType, providerModelsLoaded])
+
+  useEffect(() => {
+    if (!mentionMode) return
+    if (!workspacePath) return
+
+    const cached = workspaceFilesCacheRef.current
+    if (
+      cached &&
+      normalizePathForComparison(cached.workspacePath) === normalizePathForComparison(workspacePath)
+    ) {
+      setWorkspaceFiles(cached.files)
+      setWorkspaceFilesTruncated(cached.truncated)
+      setWorkspaceFilesLoading(false)
+      setWorkspaceFilesError(null)
+      return
+    }
+
+    let canceled = false
+    setWorkspaceFilesLoading(true)
+    setWorkspaceFilesError(null)
+
+    void (async () => {
+      try {
+        const index = await indexWorkspaceFiles(workspacePath)
+        if (canceled) return
+        setWorkspaceFiles(index.files)
+        setWorkspaceFilesTruncated(index.truncated)
+        workspaceFilesCacheRef.current = { workspacePath, files: index.files, truncated: index.truncated }
+      } catch (e) {
+        if (!canceled) {
+          setWorkspaceFilesError((e as Error).message)
+        }
+      } finally {
+        if (!canceled) setWorkspaceFilesLoading(false)
+      }
+    })()
+
+    return () => {
+      canceled = true
+    }
+  }, [mentionMode, workspacePath])
+
   const updateMessageText = useCallback((messageId: string, updater: (prev: string) => string) => {
     setMessages((prev) =>
       prev.map((m) => (m.id === messageId ? { ...m, text: updater(m.text) } : m)),
     )
+  }, [])
+
+  const persistCustomModels = useCallback(
+    (models: string[]) => {
+      setCustomModels(models)
+      if (typeof window === 'undefined') return
+      try {
+        window.localStorage.setItem(customModelStorageKey, JSON.stringify(models))
+      } catch {
+        // ignore
+      }
+    },
+    [customModelStorageKey],
+  )
+
+  const openAddModelDialog = useCallback(() => {
+    setAddModelDraft('')
+    setAddModelError(null)
+    setAddModelOpen(true)
   }, [])
 
   const removeDraftImage = useCallback((clientId: string) => {
@@ -577,6 +1452,175 @@ export function ProjectChat({
     [apiBase],
   )
 
+  const activeCodeSelections = useMemo<CodeSelection[]>(() => {
+    if (!codeSelection) return []
+
+    const filePathRaw = codeSelection.filePath.trim()
+    const text = codeSelection.text
+    if (!filePathRaw || !text.trim()) return []
+
+    const startLineCandidate = Number.isFinite(codeSelection.startLine) ? codeSelection.startLine : 1
+    const endLineCandidate = Number.isFinite(codeSelection.endLine) ? codeSelection.endLine : startLineCandidate
+    const startLine = Math.max(1, Math.floor(Math.min(startLineCandidate, endLineCandidate)))
+    const endLine = Math.max(startLine, Math.floor(Math.max(startLineCandidate, endLineCandidate)))
+
+    const displayPath = tryGetWorkspaceRelativePath(workspacePath, filePathRaw) ?? filePathRaw
+    return [{ filePath: displayPath, startLine, endLine, text }]
+  }, [codeSelection, workspacePath])
+
+  const activeWorkspaceFileRefs = useMemo<WorkspaceFileRef[]>(() => {
+    if (!mentionedFiles.length) return []
+    return mentionedFiles
+      .map((file) => file.relativePath.trim())
+      .filter(Boolean)
+      .map((filePath) => ({ filePath }))
+  }, [mentionedFiles])
+
+  const activeOpenFileBadge = useMemo(() => {
+    const filePathRaw = (activeFilePath ?? '').trim()
+    if (!filePathRaw) return null
+
+    const relativePath = tryGetWorkspaceRelativePath(workspacePath, filePathRaw) ?? filePathRaw
+    const baseName = getBaseName(relativePath)
+    const iconUrl = getVscodeFileIconUrl(baseName)
+    return { filePath: relativePath, baseName, iconUrl }
+  }, [activeFilePath, workspacePath])
+
+  const activeOpenFileRef = useMemo<WorkspaceFileRef | null>(() => {
+    if (!includeActiveFileInPrompt) return null
+    if (!activeOpenFileBadge) return null
+    return { filePath: activeOpenFileBadge.filePath }
+  }, [activeOpenFileBadge, includeActiveFileInPrompt])
+
+  const codeSelectionBadge = useMemo(() => {
+    if (!codeSelection) return null
+
+    const filePathRaw = codeSelection.filePath.trim()
+    const text = codeSelection.text
+    if (!filePathRaw || !text.trim()) return null
+
+    const startLine = Math.max(1, Math.floor(Math.min(codeSelection.startLine, codeSelection.endLine)))
+    const endLine = Math.max(startLine, Math.floor(Math.max(codeSelection.startLine, codeSelection.endLine)))
+
+    const relativePath = tryGetWorkspaceRelativePath(workspacePath, filePathRaw) ?? filePathRaw
+    const baseName = getBaseName(relativePath)
+    const iconUrl = getVscodeFileIconUrl(baseName)
+    const lineLabel = startLine === endLine ? `L${startLine}` : `L${startLine}-L${endLine}`
+    return { filePath: relativePath, baseName, iconUrl, startLine, endLine, lineLabel }
+  }, [codeSelection, workspacePath])
+
+  const mentionSuggestions = useMemo(() => {
+    if (!mentionToken) return []
+
+    const query = mentionToken.query.trim().toLowerCase()
+    const out: Array<{
+      fullPath: string
+      relativePath: string
+      baseName: string
+      iconUrl: string | null
+      score: number
+    }> = []
+
+    for (const fullPath of workspaceFiles) {
+      const baseName = getBaseName(fullPath)
+      const relativePath = tryGetWorkspaceRelativePath(workspacePath, fullPath) ?? fullPath
+
+      const baseLower = baseName.toLowerCase()
+      const relLower = relativePath.toLowerCase()
+      if (query && !baseLower.includes(query) && !relLower.includes(query)) continue
+
+      let score = 0
+      if (query) {
+        if (baseLower === query) score = 0
+        else if (baseLower.startsWith(query)) score = 1
+        else if (baseLower.includes(query)) score = 2
+        else if (relLower.includes(`/${query}`)) score = 3
+        else score = 4
+      }
+
+      out.push({
+        fullPath,
+        relativePath,
+        baseName,
+        iconUrl: getVscodeFileIconUrl(baseName),
+        score,
+      })
+    }
+
+    out.sort((a, b) => a.score - b.score || a.relativePath.length - b.relativePath.length)
+    return out.slice(0, 12)
+  }, [mentionToken, workspaceFiles, workspacePath])
+
+  useEffect(() => {
+    setMentionActiveIndex((prev) => {
+      if (mentionSuggestions.length <= 1) return 0
+      return Math.max(0, Math.min(prev, mentionSuggestions.length - 1))
+    })
+  }, [mentionSuggestions.length])
+
+  const removeMentionedFile = useCallback((fullPath: string) => {
+    const target = normalizePathForComparison(fullPath)
+    setMentionedFiles((prev) =>
+      prev.filter((file) => normalizePathForComparison(file.fullPath) !== target),
+    )
+  }, [])
+
+  const applyMentionSuggestion = useCallback(
+    (fullPath: string) => {
+      if (!mentionToken) return
+
+      const relativePath = tryGetWorkspaceRelativePath(workspacePath, fullPath) ?? fullPath
+      const baseName = getBaseName(relativePath)
+
+      setMentionedFiles((prev) => {
+        const target = normalizePathForComparison(fullPath)
+        if (prev.some((f) => normalizePathForComparison(f.fullPath) === target)) return prev
+        return [
+          ...prev,
+          {
+            fullPath,
+            relativePath,
+            baseName,
+            iconUrl: getVscodeFileIconUrl(baseName),
+          },
+        ]
+      })
+
+      const left = draft.slice(0, mentionToken.start)
+      const right = draft.slice(mentionToken.end)
+      let next = `${left}${right}`
+      let nextCaret = mentionToken.start
+
+      if (left && right) {
+        const leftChar = left[left.length - 1]
+        const rightChar = right[0]
+        if (/[A-Za-z0-9_]$/.test(leftChar) && /^[A-Za-z0-9_]/.test(rightChar)) {
+          next = `${left} ${right}`
+          nextCaret += 1
+        }
+      }
+
+      setDraft(next)
+      setMentionToken(null)
+      setMentionActiveIndex(0)
+
+      if (typeof window === 'undefined') return
+      window.requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (!el) return
+        el.focus()
+        el.setSelectionRange(nextCaret, nextCaret)
+      })
+    },
+    [draft, mentionToken, workspacePath],
+  )
+
+  const syncMentionToken = useCallback((value: string, caret: number) => {
+    const nextToken = tryGetMentionToken(value, caret)
+    setMentionToken(nextToken)
+    setMentionActiveIndex(0)
+  }, [])
+
   const send = useCallback(async () => {
     const text = draft.trim()
     const hasBlockingUploads = draftImages.some((img) => img.status !== 'ready')
@@ -595,13 +1639,21 @@ export function ProjectChat({
 
     setChatError(null)
     setDraft('')
+    setMentionToken(null)
+    setMentionActiveIndex(0)
+    setMentionedFiles([])
     setDraftImages([])
     setRawEvents([])
+    setToolOutput('')
+    setActiveReasoningMessageId(null)
 
     const taskId = randomId('task')
     const userMessageId = `msg-user-${taskId}`
-    const thinkMessageId = `msg-think-${taskId}`
     const agentMessageId = `msg-agent-${taskId}`
+    const thinkMessageIdPrefix = `msg-think-${taskId}-`
+    let thinkSegmentIndex = 0
+    let activeThinkMessageId: string | null = null
+    const seenToolCalls = new Set<string>()
 
     setMessages((prev) => [
       ...prev,
@@ -633,25 +1685,33 @@ export function ProjectChat({
         sizeBytes: img.sizeBytes,
       }))
 
+      const composedText = buildUserPromptWithWorkspaceContext(text, {
+        activeFile: activeOpenFileRef ?? undefined,
+        selections: activeCodeSelections,
+        files: activeWorkspaceFileRefs,
+      })
+
       const request = {
         jsonrpc: '2.0',
         id: randomId('req'),
         method: 'tasks/sendSubscribe',
         params: {
+          projectId: project.id,
           cwd: project.workspacePath,
           contextId: sessionIdRef.current,
           taskId,
+          ...(modelOverride.trim() ? { model: modelOverride.trim() } : {}),
           message: {
             role: 'user',
             messageId: userMessageId,
             contextId: sessionIdRef.current,
             taskId,
-            parts: [...(text ? [{ text }] : []), ...imageParts],
+            parts: [...(composedText ? [{ text: composedText }] : []), ...imageParts],
           },
         },
       }
 
-      const res = await fetch(`${apiBase}/a2a`, {
+      const res = await fetch(`${apiBase}/api/a2a`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -703,6 +1763,7 @@ export function ProjectChat({
           const chunk = readPartsText(parts)
 
           if (messageId === agentMessageId && chunk) {
+            setActiveReasoningMessageId(null)
             if (statusUpdate.final) {
               updateMessageText(agentMessageId, () => chunk)
             } else {
@@ -712,6 +1773,7 @@ export function ProjectChat({
 
           if (statusUpdate.final) {
             setSending(false)
+            setActiveReasoningMessageId(null)
             setActiveTaskId(null)
             setCanceling(false)
           }
@@ -725,6 +1787,7 @@ export function ProjectChat({
           const parts = (artifact?.parts ?? []) as unknown[]
           const chunk = readPartsText(parts)
           if (chunk) {
+            setToolOutput((prev) => prev + chunk)
             onToolOutput?.(chunk)
           }
           continue
@@ -734,9 +1797,16 @@ export function ProjectChat({
           const parts = (artifact?.parts ?? []) as unknown[]
           const chunk = readPartsText(parts)
           if (chunk) {
-            setMessages((prev) => upsertThinkChunk(prev, thinkMessageId, agentMessageId, chunk))
+            if (!activeThinkMessageId) {
+              thinkSegmentIndex += 1
+              activeThinkMessageId = `${thinkMessageIdPrefix}${thinkSegmentIndex}`
+            }
+
+            const targetThinkId = activeThinkMessageId
+            setActiveReasoningMessageId(targetThinkId)
+            setMessages((prev) => upsertThinkChunk(prev, targetThinkId, agentMessageId, chunk))
             setThinkOpenById((prev) =>
-              prev[thinkMessageId] !== undefined ? prev : { ...prev, [thinkMessageId]: true },
+              prev[targetThinkId] !== undefined ? prev : { ...prev, [targetThinkId]: true },
             )
           }
           continue
@@ -776,6 +1846,38 @@ export function ProjectChat({
             const raw = typeof dataObj.raw === 'string' ? dataObj.raw : ''
             if (!raw) continue
             setRawEvents((prev) => [...prev, { receivedAtUtc, method, raw }])
+
+            const toolCall = tryExtractCodexToolCall(raw, method)
+            if (!toolCall) continue
+
+            const dedupeKey = toolCall.callId
+              ? `call:${toolCall.callId}`
+              : `name:${toolCall.toolName}\nargs:${toolCall.toolArgs.slice(0, 256)}`
+            if (seenToolCalls.has(dedupeKey)) continue
+            seenToolCalls.add(dedupeKey)
+
+            const toolMessageId = toolCall.callId
+              ? `msg-tool-${taskId}-${toolCall.callId}`
+              : randomId(`msg-tool-${taskId}`)
+
+            const toolMessage: ChatMessage = {
+              id: toolMessageId,
+              role: 'agent',
+              kind: 'tool',
+              toolName: toolCall.toolName,
+              text: toolCall.toolArgs,
+            }
+
+            setToolOpenById((prev) =>
+              prev[toolMessageId] !== undefined ? prev : { ...prev, [toolMessageId]: false },
+            )
+
+            setMessages((prev) => insertBeforeMessage(prev, agentMessageId, toolMessage))
+
+            // Split reasoning around tool boundaries so the timeline reads:
+            // 思考 -> Tool -> 思考 -> Text
+            activeThinkMessageId = null
+            setActiveReasoningMessageId(null)
           }
         }
       }
@@ -784,10 +1886,24 @@ export function ProjectChat({
         setChatError((e as Error).message)
       }
       setSending(false)
+      setActiveReasoningMessageId(null)
       setActiveTaskId(null)
       setCanceling(false)
     }
-  }, [apiBase, draft, draftImages, onToolOutput, project.workspacePath, sending, updateMessageText])
+  }, [
+    activeCodeSelections,
+    activeOpenFileRef,
+    activeWorkspaceFileRefs,
+    apiBase,
+    draft,
+    draftImages,
+    modelOverride,
+    onToolOutput,
+    project.id,
+    project.workspacePath,
+    sending,
+    updateMessageText,
+  ])
 
   const cancel = useCallback(async () => {
     if (!activeTaskId || !sending || canceling) return
@@ -804,7 +1920,7 @@ export function ProjectChat({
         },
       }
 
-      const res = await fetch(`${apiBase}/a2a`, {
+      const res = await fetch(`${apiBase}/api/a2a`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -847,133 +1963,185 @@ export function ProjectChat({
               </div>
             )}
 
-            <div className="space-y-2">
-              {messages.map((m) => {
-                const isActiveAgentMessage =
-                  Boolean(sending && activeTaskId) && m.id === `msg-agent-${activeTaskId}`
-                const isActiveThinkMessage =
-                  Boolean(sending && activeTaskId) && m.id === `msg-think-${activeTaskId}`
-
-                const align = m.role === 'user' ? 'justify-end' : 'justify-start'
-
-                if (m.kind === 'think') {
-                  const open = thinkOpenById[m.id] ?? isActiveThinkMessage
-                  return (
-                    <div key={m.id} className={cn('mx-auto flex w-full max-w-3xl py-1', align)}>
-                      <div className="max-w-[80%] overflow-hidden rounded-lg border bg-muted/30 text-foreground">
-                        <button
-                          type="button"
-                          className={cn(
-                            'flex w-full items-center justify-between gap-3 px-3 py-2 text-xs font-medium text-muted-foreground',
-                            'hover:bg-accent/40',
-                          )}
-                          onClick={() => {
-                            setThinkOpenById((prev) => ({
-                              ...prev,
-                              [m.id]: !(prev[m.id] ?? isActiveThinkMessage),
-                            }))
-                          }}
-                        >
-                          <span className="inline-flex items-center gap-2">
-                            <span>思考</span>
-                            {isActiveThinkMessage && !m.text ? (
-                              <span className="inline-flex items-center gap-1">
-                                <Spinner className="size-3" />
-                                <span>生成中</span>
-                              </span>
-                            ) : null}
-                          </span>
-                          <ChevronDown
-                            className={cn(
-                              'size-4 shrink-0 transition-transform',
-                              open ? 'rotate-0' : '-rotate-90',
-                            )}
-                          />
-                        </button>
-
-                        {open ? (
-                          <pre className="px-3 pb-3 text-xs whitespace-pre-wrap break-words">
-                            {m.text}
-                          </pre>
-                        ) : null}
-                      </div>
-                    </div>
-                  )
-                }
-
-                const tokenUsage = m.role === 'agent' ? tokenByMessageId[m.id] : undefined
-                const showBubble =
-                  Boolean(m.text) || (m.role === 'agent' && isActiveAgentMessage)
-
-                return (
-                  <div key={m.id} className={cn('mx-auto flex w-full max-w-3xl py-1', align)}>
-                    <div className="max-w-[80%]">
-                      {showBubble ? (
-                        <div
-                          className={cn(
-                            'rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
-                            m.role === 'user'
-                              ? 'bg-primary text-primary-foreground'
-                              : m.role === 'agent'
-                                ? 'bg-muted text-foreground'
-                                : 'bg-accent text-accent-foreground',
-                          )}
-                        >
-                          {m.text ? (
-                            m.text
-                          ) : m.role === 'agent' && isActiveAgentMessage ? (
-                            <span className="inline-flex items-center">
-                              <Spinner />
-                            </span>
-                          ) : null}
-                        </div>
-                      ) : null}
-
-                      {m.images?.length ? (
-                        <div className="mt-2 grid grid-cols-2 gap-2">
-                          {m.images.map((img) => (
-                            <a
-                              key={img.id}
-                              href={img.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="block overflow-hidden rounded-md border bg-background/30"
-                              title={img.fileName || 'image'}
-                            >
-                              <img
-                                src={img.url}
-                                alt={img.fileName || ''}
-                                className="block h-auto w-full max-h-[260px] object-contain"
-                                loading="lazy"
-                              />
-                            </a>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      {tokenUsage ? (
-                        <div className={cn('mt-1', align === 'justify-end' ? 'text-right' : '')}>
-                          <TokenUsagePill usage={tokenUsage} />
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+            <ChatMessageList
+              messages={messages}
+              sending={sending}
+              activeTaskId={activeTaskId}
+              activeReasoningMessageId={activeReasoningMessageId}
+              thinkOpenById={thinkOpenById}
+              setThinkOpenById={setThinkOpenById}
+              toolOpenById={toolOpenById}
+              setToolOpenById={setToolOpenById}
+              tokenByMessageId={tokenByMessageId}
+            />
           </div>
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-card via-card/80 to-transparent px-4 pb-4 pt-10">
             <div className="pointer-events-auto mx-auto max-w-3xl">
-              <div className="rounded-2xl border bg-background/80 p-2 shadow-lg backdrop-blur">
+              <div className="relative rounded-xl border bg-background/80 p-1.5 shadow-lg backdrop-blur">
+                {mentionToken ? (
+                  <div className="absolute inset-x-2 bottom-full mb-2 overflow-hidden rounded-xl border bg-popover shadow-lg">
+                    <div className="border-b px-2 py-1 text-[11px] text-muted-foreground">
+                      文件搜索：{mentionToken.query ? `@${mentionToken.query}` : '@'}
+                      {workspaceFilesTruncated ? '（已截断）' : ''}
+                    </div>
+                    <div className="max-h-[260px] overflow-auto p-1">
+                      {!workspacePath ? (
+                        <div className="px-2 py-2 text-xs text-muted-foreground">未设置工作空间</div>
+                      ) : workspaceFilesError ? (
+                        <div className="px-2 py-2 text-xs text-destructive">{workspaceFilesError}</div>
+                      ) : workspaceFilesLoading && !workspaceFiles.length ? (
+                        <div className="px-2 py-2 text-xs text-muted-foreground">
+                          <span className="inline-flex items-center gap-2">
+                            <Spinner className="size-3" /> 索引工作区文件中…
+                          </span>
+                        </div>
+                      ) : mentionSuggestions.length ? (
+                        <div className="space-y-0.5">
+                          {mentionSuggestions.map((item, idx) => (
+                            <button
+                              key={item.fullPath}
+                              type="button"
+                              className={cn(
+                                'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left',
+                                idx === mentionActiveIndex
+                                  ? 'bg-accent text-accent-foreground'
+                                  : 'hover:bg-accent/50',
+                              )}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => applyMentionSuggestion(item.fullPath)}
+                            >
+                              {item.iconUrl ? (
+                                <img
+                                  src={item.iconUrl}
+                                  alt=""
+                                  aria-hidden="true"
+                                  draggable={false}
+                                  className="size-4.5 shrink-0"
+                                />
+                              ) : (
+                                <span className="size-4.5 shrink-0" aria-hidden="true" />
+                              )}
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm">{item.baseName}</span>
+                                <span className="block truncate text-[11px] text-muted-foreground">
+                                  {item.relativePath}
+                                </span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="px-2 py-2 text-xs text-muted-foreground">未找到匹配文件</div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="space-y-2">
+                  {activeOpenFileBadge ? (
+                    <div className="flex flex-wrap gap-2 px-1">
+                      <Badge
+                        variant="secondary"
+                        className={cn(
+                          'max-w-full min-w-0 gap-2 pr-1',
+                          includeActiveFileInPrompt ? '' : 'opacity-60',
+                        )}
+                        title={activeOpenFileBadge.filePath}
+                      >
+                        {activeOpenFileBadge.iconUrl ? (
+                          <img
+                            src={activeOpenFileBadge.iconUrl}
+                            alt=""
+                            aria-hidden="true"
+                            draggable={false}
+                            className="size-4 shrink-0"
+                          />
+                        ) : null}
+                        <span className="min-w-0 truncate">
+                          当前文件：{activeOpenFileBadge.filePath}
+                        </span>
+                        <button
+                          type="button"
+                          className="ml-auto inline-flex rounded-sm p-1 text-muted-foreground hover:bg-background/60 hover:text-foreground"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => setIncludeActiveFileInPrompt((prev) => !prev)}
+                          title={includeActiveFileInPrompt ? '点击后不加入提示词' : '点击后加入提示词'}
+                        >
+                          {includeActiveFileInPrompt ? (
+                            <Eye className="size-3" />
+                          ) : (
+                            <EyeOff className="size-3" />
+                          )}
+                        </button>
+                      </Badge>
+                    </div>
+                  ) : null}
+                  {mentionedFiles.length ? (
+                    <div className="flex flex-wrap gap-2 px-1">
+                      {mentionedFiles.map((file) => (
+                        <Badge
+                          key={file.fullPath}
+                          variant="secondary"
+                          className="max-w-full min-w-0 gap-2 pr-1"
+                          title={file.relativePath}
+                        >
+                          {file.iconUrl ? (
+                            <img
+                              src={file.iconUrl}
+                              alt=""
+                              aria-hidden="true"
+                              draggable={false}
+                              className="size-4 shrink-0"
+                            />
+                          ) : null}
+                          <span className="min-w-0 truncate">{file.relativePath}</span>
+                          <button
+                            type="button"
+                            className="ml-auto inline-flex rounded-sm p-1 text-muted-foreground hover:bg-background/60 hover:text-foreground"
+                            onClick={() => removeMentionedFile(file.fullPath)}
+                            title="移除引用文件"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                  {codeSelectionBadge ? (
+                    <div className="flex flex-wrap gap-2 px-1">
+                      <Badge variant="secondary" className="max-w-full min-w-0 gap-2 pr-1">
+                        {codeSelectionBadge.iconUrl ? (
+                          <img
+                            src={codeSelectionBadge.iconUrl}
+                            alt=""
+                            aria-hidden="true"
+                            draggable={false}
+                            className="size-4 shrink-0"
+                          />
+                        ) : null}
+                        <span className="min-w-0 truncate">
+                          {codeSelectionBadge.filePath} {codeSelectionBadge.lineLabel}
+                        </span>
+                        {onClearCodeSelection ? (
+                          <button
+                            type="button"
+                            className="ml-auto inline-flex rounded-sm p-1 text-muted-foreground hover:bg-background/60 hover:text-foreground"
+                            onClick={onClearCodeSelection}
+                            title="移除选中代码"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        ) : null}
+                      </Badge>
+                    </div>
+                  ) : null}
                   {draftImages.length ? (
                     <div className="flex flex-wrap gap-2 px-1">
                       {draftImages.map((img) => (
                         <div
                           key={img.clientId}
                           className={cn(
-                            'relative size-20 overflow-hidden rounded-md border bg-background/30',
+                            'relative size-16 overflow-hidden rounded-md border bg-background/30',
                             img.status === 'error' ? 'border-destructive' : '',
                           )}
                         >
@@ -1014,7 +2182,7 @@ export function ProjectChat({
                     </div>
                   ) : null}
 
-                  <div className="flex items-end gap-2">
+                  <div className="space-y-2">
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -1029,101 +2197,314 @@ export function ProjectChat({
                       }}
                     />
 
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      disabled={sending || draftImages.length >= maxDraftImages}
-                      onClick={() => fileInputRef.current?.click()}
-                      title="上传图片"
-                    >
-                      <ImageIcon className="size-4" />
-                      <span className="sr-only">上传图片</span>
-                    </Button>
+                    <textarea
+                      ref={textareaRef}
+                      className="min-h-[40px] max-h-[160px] w-full resize-none rounded-xl bg-background px-3 py-1.5 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
+                      placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+                      value={draft}
+                      disabled={sending}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        setDraft(value)
+                        syncMentionToken(value, e.target.selectionStart ?? value.length)
+                      }}
+                      onSelect={(e) => {
+                        const value = e.currentTarget.value
+                        syncMentionToken(value, e.currentTarget.selectionStart ?? value.length)
+                      }}
+                      onPaste={(e) => {
+                        const items = Array.from(e.clipboardData?.items ?? [])
+                        const imageFiles = items
+                          .filter((i) => i.type.startsWith('image/'))
+                          .map((i) => i.getAsFile())
+                          .filter(Boolean) as File[]
 
-                  <textarea
-                    className="min-h-[44px] max-h-[180px] w-full flex-1 resize-none rounded-xl bg-background px-3 py-2 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
-                    placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-                    value={draft}
-                    disabled={sending}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onPaste={(e) => {
-                      const items = Array.from(e.clipboardData?.items ?? [])
-                      const imageFiles = items
-                        .filter((i) => i.type.startsWith('image/'))
-                        .map((i) => i.getAsFile())
-                        .filter(Boolean) as File[]
+                        if (imageFiles.length) {
+                          e.preventDefault()
+                          addDraftImages(imageFiles)
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (mentionToken && !e.shiftKey) {
+                          if (e.key === 'Escape') {
+                            e.preventDefault()
+                            setMentionToken(null)
+                            setMentionActiveIndex(0)
+                            return
+                          }
 
-                      if (imageFiles.length) {
-                        e.preventDefault()
-                        addDraftImages(imageFiles)
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault()
-                        void send()
-                      }
-                    }}
-                  />
-                  {sending ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => void cancel()}
-                      disabled={canceling}
-                    >
-                      {canceling ? '停止中…' : '停止'}
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      onClick={() => void send()}
-                      disabled={
-                        (!draft.trim() &&
-                          draftImages.filter((img) => img.status === 'ready').length === 0) ||
-                        draftImages.some((img) => img.status !== 'ready')
-                      }
-                    >
-                      发送
-                    </Button>
-                  )}
-                </div>
+                          if (mentionSuggestions.length) {
+                            if (e.key === 'ArrowDown') {
+                              e.preventDefault()
+                              setMentionActiveIndex((prev) =>
+                                Math.min(prev + 1, Math.max(0, mentionSuggestions.length - 1)),
+                              )
+                              return
+                            }
+
+                            if (e.key === 'ArrowUp') {
+                              e.preventDefault()
+                              setMentionActiveIndex((prev) => Math.max(0, prev - 1))
+                              return
+                            }
+
+                            if (e.key === 'Tab') {
+                              e.preventDefault()
+                              applyMentionSuggestion(mentionSuggestions[mentionActiveIndex].fullPath)
+                              return
+                            }
+
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              applyMentionSuggestion(mentionSuggestions[mentionActiveIndex].fullPath)
+                              return
+                            }
+                          }
+
+                          if (workspaceFilesLoading && e.key === 'Enter') {
+                            e.preventDefault()
+                            return
+                          }
+                        }
+
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          void send()
+                        }
+                      }}
+                    />
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon-sm"
+                        disabled={sending || draftImages.length >= maxDraftImages}
+                        onClick={() => fileInputRef.current?.click()}
+                        title="上传图片"
+                      >
+                        <ImageIcon className="size-4" />
+                        <span className="sr-only">上传图片</span>
+                      </Button>
+
+                      {project.toolType === 'Codex' ? (
+                        <Select
+                          value={modelOverride.trim() ? modelOverride.trim() : modelDefaultSentinel}
+                          disabled={sending}
+                          onValueChange={(value) => {
+                            if (value === addModelSentinel) {
+                              openAddModelDialog()
+                              return
+                            }
+
+                            if (value === modelDefaultSentinel) {
+                              setModelOverride('')
+                              return
+                            }
+
+                            setModelOverride(value)
+                          }}
+                        >
+                          <SelectTrigger
+                            className="h-8 w-[180px] shrink-0 px-2 text-xs"
+                            title="选择模型"
+                          >
+                            <SelectValue placeholder="选择模型" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={modelDefaultSentinel}>
+                              项目默认{project.model ? ` (${project.model})` : ''}
+                            </SelectItem>
+                            {availableModels.length ? (
+                              <>
+                                <SelectSeparator />
+                                {availableModels.map((m) => (
+                                  <SelectItem key={m} value={m}>
+                                    {m}
+                                  </SelectItem>
+                                ))}
+                              </>
+                            ) : null}
+                            <SelectSeparator />
+                            <SelectItem value={addModelSentinel}>+ 添加模型…</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      ) : null}
+
+                      <div className="ml-auto flex items-center gap-2">
+                        {sending ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void cancel()}
+                            disabled={canceling}
+                          >
+                            {canceling ? '停止中…' : '停止'}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => void send()}
+                            disabled={
+                              (!draft.trim() &&
+                                draftImages.filter((img) => img.status === 'ready').length ===
+                                  0) ||
+                              draftImages.some((img) => img.status !== 'ready')
+                            }
+                          >
+                            发送
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </section>
 
+        <Modal
+          open={addModelOpen}
+          title="添加模型"
+          onClose={() => {
+            setAddModelOpen(false)
+            setAddModelDraft('')
+            setAddModelError(null)
+          }}
+          className="max-w-lg"
+        >
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">
+              请输入模型名称（例如：gpt-5.1-codex-max）。
+            </div>
+            <Input
+              autoFocus
+              value={addModelDraft}
+              onChange={(e) => {
+                setAddModelDraft(e.target.value)
+                if (addModelError) setAddModelError(null)
+              }}
+              placeholder="模型名称"
+            />
+            {addModelError ? <div className="text-sm text-destructive">{addModelError}</div> : null}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setAddModelOpen(false)
+                  setAddModelDraft('')
+                  setAddModelError(null)
+                }}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                onClick={() => {
+                  const model = addModelDraft.trim()
+                  if (!model) {
+                    setAddModelError('请输入模型名称')
+                    return
+                  }
+
+                  if (model.length > 200) {
+                    setAddModelError('模型名称过长')
+                    return
+                  }
+
+                  const lower = model.toLowerCase()
+                  const providerHas = providerModelOptions.some((m) => m.toLowerCase() === lower)
+                  const customHas = customModels.some((m) => m.toLowerCase() === lower)
+
+                  if (!providerHas && !customHas) {
+                    const map = new Map<string, string>()
+                    for (const existing of customModels) {
+                      const normalized = existing.trim()
+                      if (!normalized) continue
+                      map.set(normalized.toLowerCase(), normalized)
+                    }
+                    map.set(lower, model)
+                    persistCustomModels(Array.from(map.values()))
+                  }
+
+                  setModelOverride(model)
+                  setAddModelOpen(false)
+                  setAddModelDraft('')
+                  setAddModelError(null)
+                }}
+              >
+                添加
+              </Button>
+            </div>
+          </div>
+        </Modal>
+
         {detailsOpen && detailsPortalTarget
           ? createPortal(
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <div className="px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm">Raw Events</div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={!rawEvents.length}
-                      onClick={() => setRawEvents([])}
-                    >
-                      清空
-                    </Button>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={!toolOutput}
+                        onClick={() => setToolOutput('')}
+                      >
+                        清空输出
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={!rawEvents.length}
+                        onClick={() => setRawEvents([])}
+                      >
+                        清空事件
+                      </Button>
+                    </div>
                   </div>
-                  <div className="mt-2 space-y-2">
-                    {rawEvents.length ? null : (
-                      <div className="text-xs text-muted-foreground">（无）</div>
-                    )}
-                    {rawEvents.map((e, idx) => (
-                      <div key={`${e.receivedAtUtc}-${idx}`} className="rounded-md border bg-background p-2">
-                        <div className="truncate text-[11px] text-muted-foreground">
-                          {e.receivedAtUtc} {e.method ?? ''}
-                        </div>
-                        <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
-                          {e.raw}
-                        </pre>
+
+                  <div className="mt-3 space-y-4">
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground">
+                        Tool Output
                       </div>
-                    ))}
+                      {toolOutput ? (
+                        <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 text-[11px]">
+                          {toolOutput}
+                        </pre>
+                      ) : (
+                        <div className="mt-2 text-xs text-muted-foreground">（无）</div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground">
+                        Raw Events
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {rawEvents.length ? null : (
+                          <div className="text-xs text-muted-foreground">（无）</div>
+                        )}
+                        {rawEvents.map((e, idx) => (
+                          <div
+                            key={`${e.receivedAtUtc}-${idx}`}
+                            className="rounded-md border bg-background p-2"
+                          >
+                            <div className="truncate text-[11px] text-muted-foreground">
+                              {e.receivedAtUtc} {e.method ?? ''}
+                            </div>
+                            <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
+                              {e.raw}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>,

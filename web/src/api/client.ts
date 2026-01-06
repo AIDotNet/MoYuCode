@@ -23,13 +23,14 @@ import type {
   GitCommitResponse,
   GitDiffResponse,
   GitLogResponse,
+  GitRepoRequest,
+  GitStageRequest,
   GitStatusResponse,
+  GitUnstageRequest,
   WriteFileRequest,
 } from '@/api/types'
 
-const API_BASE =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-  'http://localhost:5210'
+const API_BASE =''
 
 function isApiResponse(value: unknown): value is ApiResponse<unknown> {
   if (!value || typeof value !== 'object') return false
@@ -178,15 +179,25 @@ export const api = {
       http<GitLogResponse>(
         `/api/git/log?path=${encodeURIComponent(path)}&maxCount=${encodeURIComponent(String(maxCount))}`,
       ),
-    diff: (path: string, file: string) =>
-      http<GitDiffResponse>(
-        `/api/git/diff?path=${encodeURIComponent(path)}&file=${encodeURIComponent(file)}`,
-      ),
+    diff: (path: string, file: string, opts?: { staged?: boolean }) => {
+      const staged = opts?.staged ? '&staged=true' : ''
+      return http<GitDiffResponse>(
+        `/api/git/diff?path=${encodeURIComponent(path)}&file=${encodeURIComponent(file)}${staged}`,
+      )
+    },
+    stage: (body: GitStageRequest) =>
+      http<void>(`/api/git/stage`, { method: 'POST', body: JSON.stringify(body) }),
+    unstage: (body: GitUnstageRequest) =>
+      http<void>(`/api/git/unstage`, { method: 'POST', body: JSON.stringify(body) }),
     commit: (body: GitCommitRequest) =>
       http<GitCommitResponse>(`/api/git/commit`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+    pull: (body: GitRepoRequest) =>
+      http<string>(`/api/git/pull`, { method: 'POST', body: JSON.stringify(body) }),
+    push: (body: GitRepoRequest) =>
+      http<string>(`/api/git/push`, { method: 'POST', body: JSON.stringify(body) }),
   },
 }
 

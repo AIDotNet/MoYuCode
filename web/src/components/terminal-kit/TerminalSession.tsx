@@ -2,6 +2,8 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState }
 import type { ITerminalOptions, ITheme } from '@xterm/xterm'
 import { TerminalView, type TerminalViewHandle } from './TerminalView'
 import { cn } from '@/lib/utils'
+import type { TerminalMuxSessionListener } from './TerminalMuxClient'
+import { getTerminalMuxClient } from './TerminalMuxClient'
 
 type TerminalSessionStatus = 'connecting' | 'connected' | 'closed' | 'error'
 
@@ -9,9 +11,11 @@ export type TerminalSessionHandle = {
   focus: () => void
   clear: () => void
   restart: () => void
+  terminate: () => void
 }
 
 export type TerminalSessionProps = {
+  id: string
   cwd: string
   shell?: string
   apiBase?: string
@@ -23,137 +27,144 @@ export type TerminalSessionProps = {
   onStatusChange?: (status: TerminalSessionStatus, error?: string) => void
 }
 
-function defaultApiBase(): string {
-  return (
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:5210'
-  )
-}
-
-function toWebSocketUrl(apiBase: string, path: string, params: Record<string, string>): string {
-  const url = new URL(apiBase)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.pathname = path
-  url.search = new URLSearchParams(params).toString()
-  return url.toString()
-}
-
 export const TerminalSession = forwardRef<TerminalSessionHandle, TerminalSessionProps>(
   function TerminalSession(
-    { cwd, shell, apiBase, className, ariaLabel, theme, options, autoFocus, onStatusChange },
+    { id, cwd, shell, apiBase, className, ariaLabel, theme, options, autoFocus, onStatusChange },
     ref,
   ) {
     const terminalRef = useRef<TerminalViewHandle | null>(null)
-    const wsRef = useRef<WebSocket | null>(null)
     const encoderRef = useRef<TextEncoder>(new TextEncoder())
     const decoderRef = useRef<TextDecoder>(new TextDecoder())
+    const autoFocusRef = useRef<boolean>(Boolean(autoFocus))
+    const onStatusChangeRef = useRef<TerminalSessionProps['onStatusChange']>(onStatusChange)
+    const restartRequestedRef = useRef(false)
     const [restartNonce, setRestartNonce] = useState(0)
 
-    const wsUrl = useMemo(() => {
-      const base = (apiBase ?? defaultApiBase()).trim()
-      const normalizedCwd = cwd.trim()
-      const params: Record<string, string> = {
-        cwd: normalizedCwd,
-      }
-      if (shell?.trim()) params.shell = shell.trim()
-      return toWebSocketUrl(base, '/terminal/ws', params)
-    }, [apiBase, cwd, shell])
-
-    const sendResize = (cols: number, rows: number) => {
-      const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      if (!cols || !rows) return
-      ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-    }
+    const mux = useMemo(() => getTerminalMuxClient(apiBase), [apiBase])
 
     useEffect(() => {
+      autoFocusRef.current = Boolean(autoFocus)
+    }, [autoFocus])
+
+    useEffect(() => {
+      if (typeof window === 'undefined') return
+      if (!autoFocus) return
+      const t = window.setTimeout(() => terminalRef.current?.focus(), 0)
+      return () => window.clearTimeout(t)
+    }, [autoFocus])
+
+    useEffect(() => {
+      onStatusChangeRef.current = onStatusChange
+    }, [onStatusChange])
+
+    useEffect(() => {
+      const sessionId = id.trim()
       const normalizedCwd = cwd.trim()
-      if (!normalizedCwd) {
-        onStatusChange?.('error', 'Missing cwd')
+      const normalizedShell = shell?.trim() ? shell.trim() : undefined
+
+      if (!sessionId) {
+        onStatusChangeRef.current?.('error', 'Missing session id')
         return
       }
 
+      if (!normalizedCwd) {
+        onStatusChangeRef.current?.('error', 'Missing cwd')
+        return
+      }
+
+      // Reset decoder state so multi-byte sequences don't bleed across restarts.
+      decoderRef.current = new TextDecoder()
+
       terminalRef.current?.reset()
-      onStatusChange?.('connecting')
+      onStatusChangeRef.current?.('connecting')
 
-      const ws = new WebSocket(wsUrl)
-      ws.binaryType = 'arraybuffer'
-      wsRef.current = ws
+      let disposed = false
 
-      const reportStatus = (status: TerminalSessionStatus, err?: string) => {
-        onStatusChange?.(status, err)
-      }
-
-      const reportClosed = (status: Exclude<TerminalSessionStatus, 'connected' | 'connecting'>, err?: string) => {
-        if (wsRef.current === ws) wsRef.current = null
-        onStatusChange?.(status, err)
-      }
-
-      ws.onopen = () => {
-        reportStatus('connected')
-        const { cols, rows } = terminalRef.current?.getSize() ?? { cols: 0, rows: 0 }
-        sendResize(cols, rows)
-        if (autoFocus) {
-          window.setTimeout(() => terminalRef.current?.focus(), 0)
-        }
-      }
-
-      ws.onmessage = async (event) => {
-        const handle = terminalRef.current
-        if (!handle) return
-
-        if (typeof event.data === 'string') {
-          try {
-            const obj = JSON.parse(event.data) as { type?: unknown; exitCode?: unknown }
-            if (obj?.type === 'exit') {
-              const code =
-                typeof obj.exitCode === 'number' ? obj.exitCode.toString() : String(obj.exitCode ?? '')
-              handle.writeln(`\r\n[process exited ${code}]`)
-              return
-            }
-          } catch {
-            // ignore
+      const listener: TerminalMuxSessionListener = {
+        onBinary: (bytes) => {
+          if (disposed) return
+          const handle = terminalRef.current
+          if (!handle) return
+          const text = decoderRef.current.decode(bytes, { stream: true })
+          if (text) handle.write(text)
+        },
+        onExit: (exitCode) => {
+          if (disposed) return
+          const handle = terminalRef.current
+          if (!handle) return
+          const code = exitCode === null ? '' : exitCode.toString()
+          handle.writeln(`\r\n[process exited ${code}]`)
+          onStatusChangeRef.current?.('closed')
+        },
+        onError: (message) => {
+          if (disposed) return
+          const handle = terminalRef.current
+          handle?.writeln(`\r\n[error] ${message}`)
+          onStatusChangeRef.current?.('error', message)
+        },
+        onConnectionStatus: (status, error) => {
+          if (disposed) return
+          if (status === 'error') {
+            onStatusChangeRef.current?.('error', error ?? 'WebSocket error')
+          } else if (status === 'closed') {
+            onStatusChangeRef.current?.('closed')
           }
-          return
+        },
+      }
+
+      mux.register(sessionId, listener)
+
+      void (async () => {
+        try {
+          const { cols, rows } = terminalRef.current?.getSize() ?? { cols: 80, rows: 24 }
+          const normalizedCols = cols > 0 ? cols : 80
+          const normalizedRows = rows > 0 ? rows : 24
+
+          await mux.openSession({
+            type: 'open',
+            id: sessionId,
+            cwd: normalizedCwd,
+            shell: normalizedShell,
+            cols: normalizedCols,
+            rows: normalizedRows,
+          })
+
+          if (disposed) return
+          onStatusChangeRef.current?.('connected')
+          if (autoFocusRef.current) {
+            window.setTimeout(() => terminalRef.current?.focus(), 0)
+          }
+        } catch (e) {
+          if (disposed) return
+          onStatusChangeRef.current?.('error', (e as Error).message)
         }
-
-        const buf =
-          event.data instanceof ArrayBuffer
-            ? event.data
-            : event.data instanceof Blob
-              ? await event.data.arrayBuffer()
-              : null
-
-        if (!buf) return
-        const text = decoderRef.current.decode(buf)
-        if (text) handle.write(text)
-      }
-
-      ws.onerror = () => {
-        reportClosed('error', 'WebSocket error')
-      }
-
-      ws.onclose = () => {
-        reportClosed('closed')
-      }
+      })()
 
       return () => {
-        if (wsRef.current === ws) wsRef.current = null
-        try {
-          ws.close()
-        } catch {
-          // ignore
+        disposed = true
+        const shouldClose = restartRequestedRef.current
+        restartRequestedRef.current = false
+        if (shouldClose) {
+          mux.closeSession(sessionId)
+        } else {
+          mux.detachSession(sessionId)
         }
+        mux.unregister(sessionId)
       }
-    }, [autoFocus, cwd, onStatusChange, restartNonce, wsUrl])
+    }, [cwd, id, mux, restartNonce, shell])
 
     useImperativeHandle(
       ref,
       () => ({
         focus: () => terminalRef.current?.focus(),
         clear: () => terminalRef.current?.clear(),
-        restart: () => setRestartNonce((n) => n + 1),
+        restart: () => {
+          restartRequestedRef.current = true
+          setRestartNonce((n) => n + 1)
+        },
+        terminate: () => mux.closeSession(id.trim()),
       }),
-      [],
+      [id, mux],
     )
 
     return (
@@ -166,12 +177,13 @@ export const TerminalSession = forwardRef<TerminalSessionHandle, TerminalSession
         theme={theme}
         options={options}
         onData={(data) => {
-          const ws = wsRef.current
-          if (!ws || ws.readyState !== WebSocket.OPEN) return
           const bytes = encoderRef.current.encode(data)
-          ws.send(bytes)
+          mux.sendInput(id.trim(), bytes)
         }}
-        onResize={({ cols, rows }) => sendResize(cols, rows)}
+        onResize={({ cols, rows }) => {
+          if (!cols || !rows) return
+          mux.resize(id.trim(), cols, rows)
+        }}
       />
     )
   },

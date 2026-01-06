@@ -18,7 +18,8 @@ public static class MediaEndpoints
 
     public static void MapMedia(this WebApplication app)
     {
-        var media = app.MapGroup("/media");
+        var api = app.MapGroup("/api");
+        var media = api.MapGroup("/media");
         media.MapPost("/images", UploadImagesAsync);
         media.MapGet("/images/{id}", GetImageAsync);
     }
@@ -95,7 +96,7 @@ public static class MediaEndpoints
 
             uploaded.Add(new UploadedImageDto(
                 Id: id,
-                Url: $"{baseUrl}/media/images/{id}",
+                Url: $"{baseUrl}/api/media/images/{id}",
                 FileName: safeFileName,
                 ContentType: contentType,
                 SizeBytes: file.Length));

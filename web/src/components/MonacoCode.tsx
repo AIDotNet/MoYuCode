@@ -1,9 +1,16 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { useTheme } from 'next-themes'
+import type { IDisposable } from 'monaco-editor'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@/components/ui/spinner'
 import { ensureMonacoEnvironment } from '@/lib/monaco/monacoEnvironment'
+
+export type MonacoCodeSelection = {
+  startLine: number
+  endLine: number
+  text: string
+}
 
 function getExtension(filePath: string): string {
   const base = filePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
@@ -63,6 +70,7 @@ export function MonacoCode({
   className,
   readOnly = true,
   onChange,
+  onSelectionChange,
 }: {
   code: string
   filePath?: string
@@ -70,9 +78,26 @@ export function MonacoCode({
   className?: string
   readOnly?: boolean
   onChange?: (value: string) => void
+  onSelectionChange?: (selection: MonacoCodeSelection | null) => void
 }) {
   ensureMonacoEnvironment()
   const { resolvedTheme } = useTheme()
+
+  const selectionDisposableRef = useRef<IDisposable | null>(null)
+  const lastSelectionRef = useRef<MonacoCodeSelection | null>(null)
+  const onSelectionChangeRef = useRef(onSelectionChange)
+
+  useEffect(() => {
+    onSelectionChangeRef.current = onSelectionChange
+  }, [onSelectionChange])
+
+  useEffect(() => {
+    return () => {
+      selectionDisposableRef.current?.dispose()
+      selectionDisposableRef.current = null
+      lastSelectionRef.current = null
+    }
+  }, [])
 
   const modelPath = useMemo(() => {
     if (!filePath) return undefined
@@ -98,6 +123,53 @@ export function MonacoCode({
         path={modelPath}
         saveViewState
         theme={theme}
+        onMount={(editor) => {
+          selectionDisposableRef.current?.dispose()
+
+          const emitSelection = () => {
+            const model = editor.getModel()
+            const selection = editor.getSelection()
+            if (!model || !selection || selection.isEmpty()) {
+              if (lastSelectionRef.current !== null) {
+                lastSelectionRef.current = null
+                onSelectionChangeRef.current?.(null)
+              }
+              return
+            }
+
+            const text = model.getValueInRange(selection)
+            if (!text.trim()) {
+              if (lastSelectionRef.current !== null) {
+                lastSelectionRef.current = null
+                onSelectionChangeRef.current?.(null)
+              }
+              return
+            }
+
+            const startLine = Math.min(selection.startLineNumber, selection.endLineNumber)
+            const endLine = Math.max(selection.startLineNumber, selection.endLineNumber)
+            const next: MonacoCodeSelection = { startLine, endLine, text }
+
+            const prev = lastSelectionRef.current
+            if (
+              prev &&
+              prev.startLine === next.startLine &&
+              prev.endLine === next.endLine &&
+              prev.text === next.text
+            ) {
+              return
+            }
+
+            lastSelectionRef.current = next
+            onSelectionChangeRef.current?.(next)
+          }
+
+          selectionDisposableRef.current = editor.onDidChangeCursorSelection(() => {
+            emitSelection()
+          })
+
+          emitSelection()
+        }}
         onChange={(value) => {
           if (readOnly) return
           onChange?.(value ?? '')

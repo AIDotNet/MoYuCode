@@ -5,7 +5,7 @@ namespace OneCode.Infrastructure;
 
 public class JsonOptions
 {
-    public static JsonSerializerOptions DefaultOptions => new()
+    public static JsonSerializerOptions DefaultOptions => new(JsonSerializerDefaults.Web)
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,

@@ -4,6 +4,13 @@ import type { ProjectDto, ProjectSessionDto, SessionTokenUsageDto } from '@/api/
 import { SessionTraceBar, TokenUsageColumnChart } from '@/components/CodexSessionViz'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
 type SessionsCacheEntry = {
@@ -262,17 +269,21 @@ export function ProjectSessionsView({
               </label>
               <label className="inline-flex items-center gap-2">
                 <span>阈值</span>
-                <select
-                  className="h-8 rounded-md border bg-background px-2 text-xs"
-                  value={waitingClampMs}
+                <Select
+                  value={String(waitingClampMs)}
                   disabled={!collapseWaiting}
-                  onChange={(e) => setWaitingClampMs(Number(e.target.value))}
+                  onValueChange={(value) => setWaitingClampMs(Number(value))}
                 >
-                  <option value={10_000}>10秒</option>
-                  <option value={30_000}>30秒</option>
-                  <option value={60_000}>1分钟</option>
-                  <option value={300_000}>5分钟</option>
-                </select>
+                  <SelectTrigger className="h-8 w-[110px] bg-background px-2 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10000">10秒</SelectItem>
+                    <SelectItem value="30000">30秒</SelectItem>
+                    <SelectItem value="60000">1分钟</SelectItem>
+                    <SelectItem value="300000">5分钟</SelectItem>
+                  </SelectContent>
+                </Select>
               </label>
             </div>
           </div>

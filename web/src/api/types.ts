@@ -229,6 +229,20 @@ export type GitCommitRequest = {
   message: string
 }
 
+export type GitRepoRequest = {
+  path: string
+}
+
+export type GitStageRequest = {
+  path: string
+  file: string
+}
+
+export type GitUnstageRequest = {
+  path: string
+  file: string
+}
+
 export type GitCommitResponse = {
   hash: string
   subject: string

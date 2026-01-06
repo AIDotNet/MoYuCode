@@ -8,31 +8,39 @@ export function ProjectSelectionCard({
   projects,
   scanning,
   scanLogs,
-  codexStatus,
+  toolStatus,
+  toolLabel,
+  routePath,
+  scanCommandLabel,
+  scanTooltip,
   onSelectProject,
   onCreateProject,
   onScanProjects,
   onStopScan,
-  onGoInstallCodex,
+  onGoInstallTool,
 }: {
   projects: ProjectDto[]
   scanning: boolean
   scanLogs: string[]
-  codexStatus: ToolStatusDto | null
+  toolStatus: ToolStatusDto | null
+  toolLabel: string
+  routePath: string
+  scanCommandLabel: string
+  scanTooltip: string
   onSelectProject: (id: string) => void
   onCreateProject: () => void
   onScanProjects: () => void
   onStopScan: () => void
-  onGoInstallCodex: () => void
+  onGoInstallTool: () => void
 }) {
-  const codexInstalled = codexStatus ? codexStatus.installed : null
+  const toolInstalled = toolStatus ? toolStatus.installed : null
 
   return (
     <div className="rounded-lg border bg-card p-4 animate-in fade-in-0 duration-200">
       <div className="text-sm font-medium">先选择一个项目</div>
       <div className="mt-1 text-xs text-muted-foreground">
         选择后会打开工作区，并将路由固定为{' '}
-        <code className="px-1">/code?projects=id</code>。
+        <code className="px-1">{routePath}?projects=id</code>。
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -45,9 +53,9 @@ export function ProjectSelectionCard({
           type="button"
           variant="outline"
           size="sm"
-          disabled={scanning || codexInstalled === false}
+          disabled={scanning || toolInstalled === false}
           onClick={onScanProjects}
-          title="扫描 Codex sessions 并创建项目"
+          title={scanTooltip}
         >
           {scanning ? (
             <span className="inline-flex items-center gap-2">
@@ -61,21 +69,22 @@ export function ProjectSelectionCard({
           )}
         </Button>
 
-        {codexStatus?.version ? (
+        {toolStatus?.version ? (
           <div className="ml-auto text-xs text-muted-foreground">
-            Codex v{codexStatus.version}
+            {toolLabel} v{toolStatus.version}
           </div>
         ) : null}
       </div>
 
-      {codexInstalled === false ? (
+      {toolInstalled === false ? (
         <div className="mt-3 rounded-md border bg-muted/30 p-3 text-sm">
-          <div className="font-medium">未检测到 Codex</div>
+          <div className="font-medium">未检测到 {toolLabel}</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            扫描前会执行 <code className="px-1">codex -V</code>；请先安装 Codex CLI。
+            扫描前会执行 <code className="px-1">{scanCommandLabel}</code>；请先安装{' '}
+            {toolLabel} CLI。
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button type="button" size="sm" onClick={onGoInstallCodex}>
+            <Button type="button" size="sm" onClick={onGoInstallTool}>
               前往安装
             </Button>
           </div>
@@ -123,4 +132,3 @@ export function ProjectSelectionCard({
     </div>
   )
 }
-

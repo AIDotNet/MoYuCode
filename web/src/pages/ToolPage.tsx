@@ -94,7 +94,15 @@ function prereqLabel(installed: boolean, version: string | null) {
   return version ? `v${version}` : '已安装'
 }
 
-export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
+export function ToolPage({
+  tool,
+  title,
+  fallbackRoute = '/code',
+}: {
+  tool: ToolKey
+  title: string
+  fallbackRoute?: string
+}) {
   const navigate = useNavigate()
   const toolType: ToolType = tool === 'codex' ? 'Codex' : 'ClaudeCode'
   const toolLabel = toolType === 'Codex' ? 'Codex' : 'Claude Code'
@@ -123,8 +131,8 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
       navigate(-1)
       return
     }
-    navigate('/code')
-  }, [navigate])
+    navigate(fallbackRoute)
+  }, [fallbackRoute, navigate])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -451,4 +459,3 @@ export function ToolPage({ tool, title }: { tool: ToolKey; title: string }) {
     </div>
   )
 }
-

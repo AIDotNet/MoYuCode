@@ -109,7 +109,17 @@ export default function App() {
             <Route path="/code" element={<CodePage />} />
             <Route path="/node" element={<NodeInstallPage />} />
             <Route path="/codex" element={<ToolPage tool="codex" title="Codex" />} />
-            <Route path="/claude" element={<ToolPage tool="claude" title="Claude Code" />} />
+            <Route path="/claude" element={<CodePage mode="claude" />} />
+            <Route
+              path="/claude/tool"
+              element={
+                <ToolPage
+                  tool="claude"
+                  title="Claude Code"
+                  fallbackRoute="/claude"
+                />
+              }
+            />
             <Route path="/providers" element={<Providers />} />
             <Route path="/projects/:id" element={<LegacyProjectRouteRedirect />} />
             <Route path="*" element={<Navigate to="/code" replace />} />

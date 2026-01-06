@@ -141,11 +141,17 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       [],
     )
 
+    const focusTerminal = () => terminalRef.current?.focus()
+
     return (
       <div
         ref={containerRef}
         className={cn('h-full min-h-0 w-full min-w-0', className)}
         aria-label={ariaLabel}
+        tabIndex={0}
+        onPointerDownCapture={focusTerminal}
+        onMouseDownCapture={focusTerminal}
+        onFocus={focusTerminal}
       />
     )
   },

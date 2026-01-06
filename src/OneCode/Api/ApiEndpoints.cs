@@ -4,7 +4,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using OneCode.Contracts.FileSystem;
 using OneCode.Contracts.Git;
@@ -104,7 +103,7 @@ public static class ApiEndpoints
                 Lines: lines);
         });
 
-        git.MapGet("/diff", async (string path, string file, CancellationToken cancellationToken) =>
+        git.MapGet("/diff", async (string path, string file, CancellationToken cancellationToken, bool staged = false) =>
         {
             if (string.IsNullOrWhiteSpace(file))
             {
@@ -125,9 +124,11 @@ public static class ApiEndpoints
             }
             else
             {
-                diff = await TryRunGitAsync(repoRoot, ["diff", "--no-color", "HEAD", "--", relative], cancellationToken)
-                    ?? await TryRunGitAsync(repoRoot, ["diff", "--no-color", "--", relative], cancellationToken)
-                    ?? string.Empty;
+                diff = staged
+                    ? await TryRunGitAsync(repoRoot, ["diff", "--no-color", "--cached", "--", relative], cancellationToken)
+                        ?? string.Empty
+                    : await TryRunGitAsync(repoRoot, ["diff", "--no-color", "--", relative], cancellationToken)
+                        ?? string.Empty;
 
                 diff = diff.TrimEnd();
                 if (diff.Length > 400_000)
@@ -143,6 +144,40 @@ public static class ApiEndpoints
                 Truncated: truncated);
         });
 
+        git.MapPost("/stage", async ([FromBody] GitStageRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.File))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "File is required.");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
+            var relative = request.File.Trim();
+            await RunGitAsync(repoRoot, ["add", "--", relative], cancellationToken);
+        });
+
+        git.MapPost("/unstage", async ([FromBody] GitUnstageRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.File))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "File is required.");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
+            var relative = request.File.Trim();
+            await RunGitAsync(repoRoot, ["restore", "--staged", "--", relative], cancellationToken);
+        });
+
         git.MapPost("/commit", async ([FromBody] GitCommitRequest request, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(request.Path))
@@ -156,7 +191,16 @@ public static class ApiEndpoints
             }
 
             var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
-            await RunGitAsync(repoRoot, ["add", "-A"], cancellationToken);
+
+            var stagedFiles = await TryRunGitAsync(
+                repoRoot,
+                ["diff", "--cached", "--name-only"],
+                cancellationToken);
+
+            if (string.IsNullOrWhiteSpace(stagedFiles))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "No staged changes to commit.");
+            }
 
             var message = request.Message.Trim();
             await RunGitAsync(repoRoot, ["commit", "-m", message], cancellationToken);
@@ -165,6 +209,28 @@ public static class ApiEndpoints
             var subject = (await RunGitAsync(repoRoot, ["log", "-1", "--pretty=%s"], cancellationToken)).Trim();
 
             return new GitCommitResponse(Hash: hash, Subject: subject);
+        });
+
+        git.MapPost("/pull", async ([FromBody] GitRepoRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
+            return await RunGitAsync(repoRoot, ["pull", "--no-edit"], cancellationToken);
+        });
+
+        git.MapPost("/push", async ([FromBody] GitRepoRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            var repoRoot = await ResolveGitRootAsync(request.Path, cancellationToken);
+            return await RunGitAsync(repoRoot, ["push"], cancellationToken);
         });
     }
 
@@ -386,6 +452,9 @@ public static class ApiEndpoints
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+
+            process.StartInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            process.StartInfo.Environment["GCM_INTERACTIVE"] = "never";
 
             foreach (var arg in arguments)
             {
@@ -1090,18 +1159,18 @@ public static class ApiEndpoints
     {
         var providers = api.MapGroup("/providers");
 
-        providers.MapGet("", async (OneCodeDbContext db, CancellationToken cancellationToken) =>
+        providers.MapGet("", (JsonDataStore store) =>
         {
-            var list = await db.Providers
+            var list = store.Providers
                 .OrderBy(x => x.Name)
-                .ToListAsync(cancellationToken);
+                .ToList();
 
             return (IReadOnlyList<ProviderDto>)list.Select(ToDto).ToList();
         });
 
-        providers.MapGet("/{id:guid}", async (Guid id, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        providers.MapGet("/{id:guid}", (Guid id, JsonDataStore store) =>
         {
-            var entity = await db.Providers.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
@@ -1110,7 +1179,7 @@ public static class ApiEndpoints
             return ToDto(entity);
         });
 
-        providers.MapPost("", async ([FromBody] ProviderUpsertRequest request, OneCodeDbContext db, HttpContext httpContext, CancellationToken cancellationToken) =>
+        providers.MapPost("", async ([FromBody] ProviderUpsertRequest request, JsonDataStore store, HttpContext httpContext) =>
         {
             if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Address))
             {
@@ -1136,16 +1205,16 @@ public static class ApiEndpoints
                 UpdatedAtUtc = DateTimeOffset.UtcNow,
             };
 
-            db.Providers.Add(entity);
-            await db.SaveChangesAsync(cancellationToken);
+            store.Add(entity);
+            await store.SaveDataAsync();
 
             httpContext.Response.StatusCode = StatusCodes.Status201Created;
             return ToDto(entity);
         });
 
-        providers.MapPut("/{id:guid}", async (Guid id, [FromBody] ProviderUpsertRequest request, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        providers.MapPut("/{id:guid}", async (Guid id, [FromBody] ProviderUpsertRequest request, JsonDataStore store) =>
         {
-            var entity = await db.Providers.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
@@ -1168,26 +1237,26 @@ public static class ApiEndpoints
                 entity.ApiKey = request.ApiKey;
             }
 
-            await db.SaveChangesAsync(cancellationToken);
+            await store.SaveDataAsync();
             return ToDto(entity);
         });
 
-        providers.MapDelete("/{id:guid}", async (Guid id, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        providers.MapDelete("/{id:guid}", async (Guid id, JsonDataStore store) =>
         {
-            var entity = await db.Providers.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
             }
 
-            db.Providers.Remove(entity);
-            await db.SaveChangesAsync(cancellationToken);
+            store.Remove(entity);
+            await store.SaveDataAsync();
             return true;
         });
 
-        providers.MapPost("/{id:guid}/refresh-models", async (Guid id, OneCodeDbContext db, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
+        providers.MapPost("/{id:guid}/refresh-models", async (Guid id, JsonDataStore store, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
         {
-            var entity = await db.Providers.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
@@ -1197,7 +1266,7 @@ public static class ApiEndpoints
             entity.Models = models.Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
             entity.ModelsRefreshedAtUtc = DateTimeOffset.UtcNow;
             entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            await store.SaveDataAsync();
 
             return ToDto(entity);
         });
@@ -1207,22 +1276,29 @@ public static class ApiEndpoints
     {
         var projects = api.MapGroup("/projects");
 
-        projects.MapGet("", async (ToolType toolType, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        projects.MapGet("", (ToolType toolType, JsonDataStore store) =>
         {
-            var list = await db.Projects
-                .Include(x => x.Provider)
+            var list = store.Projects
                 .Where(x => x.ToolType == toolType)
                 .OrderBy(x => x.Name)
-                .ToListAsync(cancellationToken);
+                .ToList();
+
+            // Load provider references
+            foreach (var project in list)
+            {
+                if (project.ProviderId.HasValue)
+                {
+                    var provider = store.Providers.FirstOrDefault(p => p.Id == project.ProviderId.Value);
+                    project.Provider = provider;
+                }
+            }
 
             return (IReadOnlyList<ProjectDto>)list.Select(ToDto).ToList();
         });
 
-        projects.MapGet("/{id:guid}", async (Guid id, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        projects.MapGet("/{id:guid}", (Guid id, JsonDataStore store) =>
         {
-            var project = await db.Projects
-                .Include(x => x.Provider)
-                .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var project = store.GetProjectWithProvider(id);
 
             if (project is null)
             {
@@ -1234,9 +1310,8 @@ public static class ApiEndpoints
 
         projects.MapPost("", async (
             [FromBody] ProjectUpsertRequest request,
-            OneCodeDbContext db,
-            HttpContext httpContext,
-            CancellationToken cancellationToken) =>
+            JsonDataStore store,
+            HttpContext httpContext) =>
         {
             if (string.IsNullOrWhiteSpace(request.Name))
             {
@@ -1255,8 +1330,7 @@ public static class ApiEndpoints
 
             if (request.ProviderId.HasValue)
             {
-                var providerExists = await db.Providers.AnyAsync(x => x.Id == request.ProviderId, cancellationToken);
-                if (!providerExists)
+                if (!store.ProviderExists(request.ProviderId.Value))
                 {
                     throw new ApiHttpException(StatusCodes.Status400BadRequest, "ProviderId does not exist.");
                 }
@@ -1274,17 +1348,25 @@ public static class ApiEndpoints
                 UpdatedAtUtc = DateTimeOffset.UtcNow,
             };
 
-            db.Projects.Add(entity);
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-            }
-            catch (DbUpdateException)
+            // Check for duplicate name
+            var duplicate = store.Projects.FirstOrDefault(x =>
+                x.ToolType == entity.ToolType &&
+                x.Name.Equals(entity.Name, StringComparison.OrdinalIgnoreCase));
+            if (duplicate != null)
             {
                 throw new ApiHttpException(StatusCodes.Status409Conflict, "Project name already exists for this tool type.");
             }
 
-            await db.Entry(entity).Reference(x => x.Provider).LoadAsync(cancellationToken);
+            store.Add(entity);
+            await store.SaveDataAsync();
+
+            // Load provider reference
+            if (entity.ProviderId.HasValue)
+            {
+                var provider = store.Providers.FirstOrDefault(p => p.Id == entity.ProviderId.Value);
+                entity.Provider = provider;
+            }
+
             httpContext.Response.StatusCode = StatusCodes.Status201Created;
             return ToDto(entity);
         });
@@ -1292,10 +1374,9 @@ public static class ApiEndpoints
         projects.MapPut("/{id:guid}", async (
             Guid id,
             [FromBody] ProjectUpsertRequest request,
-            OneCodeDbContext db,
-            CancellationToken cancellationToken) =>
+            JsonDataStore store) =>
         {
-            var entity = await db.Projects.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Projects.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Project not found.");
@@ -1318,8 +1399,7 @@ public static class ApiEndpoints
 
             if (request.ProviderId.HasValue)
             {
-                var providerExists = await db.Providers.AnyAsync(x => x.Id == request.ProviderId, cancellationToken);
-                if (!providerExists)
+                if (!store.ProviderExists(request.ProviderId.Value))
                 {
                     throw new ApiHttpException(StatusCodes.Status400BadRequest, "ProviderId does not exist.");
                 }
@@ -1332,41 +1412,47 @@ public static class ApiEndpoints
             entity.Model = string.IsNullOrWhiteSpace(request.Model) ? null : request.Model.Trim();
             entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-            }
-            catch (DbUpdateException)
+            // Check for duplicate name (excluding current entity)
+            var duplicate = store.Projects.FirstOrDefault(x =>
+                x.Id != id &&
+                x.ToolType == entity.ToolType &&
+                x.Name.Equals(entity.Name, StringComparison.OrdinalIgnoreCase));
+            if (duplicate != null)
             {
                 throw new ApiHttpException(StatusCodes.Status409Conflict, "Project name already exists for this tool type.");
             }
 
-            await db.Entry(entity).Reference(x => x.Provider).LoadAsync(cancellationToken);
+            await store.SaveDataAsync();
+
+            // Load provider reference
+            if (entity.ProviderId.HasValue)
+            {
+                var provider = store.Providers.FirstOrDefault(p => p.Id == entity.ProviderId.Value);
+                entity.Provider = provider;
+            }
+
             return ToDto(entity);
         });
 
-        projects.MapDelete("/{id:guid}", async (Guid id, OneCodeDbContext db, CancellationToken cancellationToken) =>
+        projects.MapDelete("/{id:guid}", async (Guid id, JsonDataStore store) =>
         {
-            var entity = await db.Projects.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var entity = store.Projects.FirstOrDefault(x => x.Id == id);
             if (entity is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Project not found.");
             }
 
-            db.Projects.Remove(entity);
-            await db.SaveChangesAsync(cancellationToken);
+            store.Remove(entity);
+            await store.SaveDataAsync();
             return true;
         });
 
         projects.MapPost("/{id:guid}/start", async (
             Guid id,
-            OneCodeDbContext db,
-            TerminalWindowLauncher terminalWindowLauncher,
-            CancellationToken cancellationToken) =>
+            JsonDataStore store,
+            TerminalWindowLauncher terminalWindowLauncher) =>
         {
-            var project = await db.Projects
-                .Include(x => x.Provider)
-                .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var project = store.GetProjectWithProvider(id);
 
             if (project is null)
             {
@@ -1401,16 +1487,16 @@ public static class ApiEndpoints
 
             project.LastStartedAtUtc = DateTimeOffset.UtcNow;
             project.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            await store.SaveDataAsync();
             return true;
         });
 
         projects.MapGet("/{id:guid}/sessions", async (
             Guid id,
-            OneCodeDbContext db,
+            JsonDataStore store,
             CancellationToken cancellationToken) =>
         {
-            var project = await db.Projects.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var project = store.Projects.FirstOrDefault(x => x.Id == id);
             if (project is null)
             {
                 throw new ApiHttpException(StatusCodes.Status404NotFound, "Project not found.");
@@ -1510,7 +1596,7 @@ public static class ApiEndpoints
 
         projects.MapGet("/scan-codex-sessions", async (
             ToolType toolType,
-            OneCodeDbContext db,
+            JsonDataStore store,
             HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
@@ -1617,7 +1703,7 @@ public static class ApiEndpoints
 
                 await LogAsync($"发现 Claude projects 目录：{projectDirs.Length}");
 
-                var claudeUniqueCwds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var claudeUniqueCwds = new HashSet<string>(GetPathComparer());
                 var claudeReadErrors = 0;
                 var claudeJsonErrors = 0;
 
@@ -1744,19 +1830,19 @@ public static class ApiEndpoints
                     await LogAsync($"发现 cwd 数：{claudeUniqueCwds.Count}（后续仅展示创建/跳过日志）");
                 }
 
-                var claudeExistingProjects = await db.Projects
+                var claudeExistingProjects = store.Projects
                     .Where(x => x.ToolType == toolType)
                     .Select(x => new { x.Name, x.WorkspacePath })
-                    .ToListAsync(cancellationToken);
+                    .ToList();
 
                 var claudeExistingNameSet = new HashSet<string>(
                     claudeExistingProjects.Select(x => x.Name),
                     StringComparer.OrdinalIgnoreCase);
                 var claudeExistingWorkspaceSet = new HashSet<string>(
                     claudeExistingProjects.Select(x => x.WorkspacePath),
-                    StringComparer.OrdinalIgnoreCase);
+                    GetPathComparer());
 
-                var claudeWorkspaceToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var claudeWorkspaceToName = new Dictionary<string, string>(GetPathComparer());
                 foreach (var project in claudeExistingProjects)
                 {
                     if (!claudeWorkspaceToName.ContainsKey(project.WorkspacePath))
@@ -1774,7 +1860,7 @@ public static class ApiEndpoints
 
                 await LogAsync("开始创建项目…");
 
-                foreach (var cwd in claudeUniqueCwds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                foreach (var cwd in claudeUniqueCwds.OrderBy(x => x, GetPathComparer()))
                 {
                     if (!connected || cancellationToken.IsCancellationRequested)
                     {
@@ -1850,10 +1936,10 @@ public static class ApiEndpoints
                         UpdatedAtUtc = DateTimeOffset.UtcNow,
                     };
 
-                    db.Projects.Add(entity);
+                    store.Add(entity);
                     try
                     {
-                        await db.SaveChangesAsync(cancellationToken);
+                        await store.SaveDataAsync();
                         claudeCreated++;
                         claudeExistingNameSet.Add(name);
                         claudeExistingWorkspaceSet.Add(workspacePath);
@@ -1864,9 +1950,9 @@ public static class ApiEndpoints
                     {
                         return Results.Empty;
                     }
-                    catch (DbUpdateException)
+                    catch (Exception)
                     {
-                        db.Entry(entity).State = EntityState.Detached;
+                        store.Remove(entity);
                         claudeSkippedExisting++;
                         if (claudeLoggedExistingSkips < 20)
                         {
@@ -1952,7 +2038,7 @@ public static class ApiEndpoints
 
             await LogAsync($"发现 .jsonl 文件：{jsonlFiles.Length}");
 
-            var uniqueCwds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var uniqueCwds = new HashSet<string>(GetPathComparer());
             var readErrors = 0;
             var jsonErrors = 0;
 
@@ -2043,19 +2129,19 @@ public static class ApiEndpoints
                 await LogAsync($"发现 cwd 数：{uniqueCwds.Count}（后续仅展示创建/跳过日志）");
             }
 
-            var existingProjects = await db.Projects
+            var existingProjects = store.Projects
                 .Where(x => x.ToolType == toolType)
                 .Select(x => new { x.Name, x.WorkspacePath })
-                .ToListAsync(cancellationToken);
+                .ToList();
 
             var existingNameSet = new HashSet<string>(
                 existingProjects.Select(x => x.Name),
                 StringComparer.OrdinalIgnoreCase);
             var existingWorkspaceSet = new HashSet<string>(
                 existingProjects.Select(x => x.WorkspacePath),
-                StringComparer.OrdinalIgnoreCase);
+                GetPathComparer());
 
-            var workspaceToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var workspaceToName = new Dictionary<string, string>(GetPathComparer());
             foreach (var project in existingProjects)
             {
                 if (!workspaceToName.ContainsKey(project.WorkspacePath))
@@ -2073,7 +2159,7 @@ public static class ApiEndpoints
 
             await LogAsync("开始创建项目…");
 
-            foreach (var cwd in uniqueCwds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            foreach (var cwd in uniqueCwds.OrderBy(x => x, GetPathComparer()))
             {
                 if (!connected || cancellationToken.IsCancellationRequested)
                 {
@@ -2149,10 +2235,10 @@ public static class ApiEndpoints
                     UpdatedAtUtc = DateTimeOffset.UtcNow,
                 };
 
-                db.Projects.Add(entity);
+                store.Add(entity);
                 try
                 {
-                    await db.SaveChangesAsync(cancellationToken);
+                    await store.SaveDataAsync();
                     created++;
                     existingNameSet.Add(name);
                     existingWorkspaceSet.Add(workspacePath);
@@ -2163,9 +2249,9 @@ public static class ApiEndpoints
                 {
                     return Results.Empty;
                 }
-                catch (DbUpdateException)
+                catch (Exception)
                 {
-                    db.Entry(entity).State = EntityState.Detached;
+                    store.Remove(entity);
                     skippedExisting++;
                     if (loggedExistingSkips < 20)
                     {
@@ -4706,7 +4792,11 @@ public static class ApiEndpoints
             return false;
         }
 
-        if (candidateFull.Equals(rootFull, StringComparison.OrdinalIgnoreCase))
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (candidateFull.Equals(rootFull, comparison))
         {
             return true;
         }
@@ -4715,7 +4805,14 @@ public static class ApiEndpoints
             ? rootFull
             : rootFull + Path.DirectorySeparatorChar;
 
-        return candidateFull.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase);
+        return candidateFull.StartsWith(rootWithSep, comparison);
+    }
+
+    private static StringComparer GetPathComparer()
+    {
+        return OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
     }
 
     private static string GetCodexHomePath()
@@ -4738,35 +4835,120 @@ public static class ApiEndpoints
             return false;
         }
 
-        // Claude Code stores projects under ~/.claude/projects/<encoded-path>/...
-        // On Windows this looks like: c--code-RoutinAI
-        // Where:
-        //   "--" => ":\"
-        //   "-"  => "\"
         var trimmed = directoryName.Trim();
-        var idx = trimmed.IndexOf("--", StringComparison.Ordinal);
-        if (idx <= 0)
-        {
-            return false;
-        }
 
-        var driveToken = trimmed[..idx];
-        if (driveToken.Length != 1 || !char.IsLetter(driveToken[0]))
-        {
-            return false;
-        }
+        // Claude Code stores projects under ~/.claude/projects/<encoded-path>/...
+        // Observed patterns:
+        // - Windows: c--code-repo  => C:\code\repo
+        // - Linux/macOS: home-user-code-repo => /home/user/code/repo
+        // The encoding is lossy (folder names can contain '-') so we first attempt to
+        // resolve a real directory by trying different '-' groupings, then fall back.
 
-        var driveLetter = char.ToUpperInvariant(driveToken[0]);
-        var rest = trimmed[(idx + 2)..];
-
-        if (rest.Length == 0)
+        if (OperatingSystem.IsWindows())
         {
-            workspacePath = $"{driveLetter}:{Path.DirectorySeparatorChar}";
+            var idx = trimmed.IndexOf("--", StringComparison.Ordinal);
+            if (idx <= 0)
+            {
+                return false;
+            }
+
+            var driveToken = trimmed[..idx];
+            if (driveToken.Length != 1 || !char.IsLetter(driveToken[0]))
+            {
+                return false;
+            }
+
+            var driveLetter = char.ToUpperInvariant(driveToken[0]);
+            var rest = trimmed[(idx + 2)..];
+
+            var rootPath = $"{driveLetter}:{Path.DirectorySeparatorChar}";
+            if (rest.Length == 0)
+            {
+                workspacePath = rootPath;
+                return true;
+            }
+
+            workspacePath = TryResolveExistingHyphenDecodedPath(rootPath, rest)
+                ?? BuildNaiveHyphenDecodedPath(rootPath, rest);
             return true;
         }
 
-        workspacePath = $"{driveLetter}:{Path.DirectorySeparatorChar}{rest.Replace('-', Path.DirectorySeparatorChar)}";
+        var encoded = trimmed.Trim('-');
+        var unixRoot = Path.DirectorySeparatorChar.ToString();
+        if (encoded.Length == 0)
+        {
+            workspacePath = unixRoot;
+            return true;
+        }
+
+        workspacePath = TryResolveExistingHyphenDecodedPath(unixRoot, encoded)
+            ?? BuildNaiveHyphenDecodedPath(unixRoot, encoded);
         return true;
+    }
+
+    private static string BuildNaiveHyphenDecodedPath(string rootPath, string encodedPath)
+    {
+        var trimmed = (encodedPath ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+        {
+            return rootPath;
+        }
+
+        return Path.Combine(rootPath, trimmed.Replace('-', Path.DirectorySeparatorChar));
+    }
+
+    private static string? TryResolveExistingHyphenDecodedPath(string rootPath, string encodedPath)
+    {
+        var trimmed = (encodedPath ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+        {
+            return rootPath;
+        }
+
+        if (!Directory.Exists(rootPath))
+        {
+            return null;
+        }
+
+        var tokens = trimmed.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0)
+        {
+            return rootPath;
+        }
+
+        string? TryResolve(int index, string currentPath)
+        {
+            if (index >= tokens.Length)
+            {
+                return currentPath;
+            }
+
+            var segmentBuilder = new StringBuilder();
+            for (var j = index; j < tokens.Length; j++)
+            {
+                if (j > index)
+                {
+                    segmentBuilder.Append('-');
+                }
+
+                segmentBuilder.Append(tokens[j]);
+                var candidatePath = Path.Combine(currentPath, segmentBuilder.ToString());
+                if (!Directory.Exists(candidatePath))
+                {
+                    continue;
+                }
+
+                var resolved = TryResolve(j + 1, candidatePath);
+                if (resolved is not null)
+                {
+                    return resolved;
+                }
+            }
+
+            return null;
+        }
+
+        return TryResolve(0, rootPath);
     }
 
     private const int ProjectNameMaxLength = 200;

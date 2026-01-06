@@ -5,6 +5,13 @@ import { DirectoryPicker } from '@/components/DirectoryPicker'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
 type FormState = {
   toolType: ToolType
@@ -17,6 +24,8 @@ type FormState = {
 function emptyForm(toolType: ToolType): FormState {
   return { toolType, name: '', workspacePath: '', providerId: null, model: '' }
 }
+
+const providerDefaultSentinel = '__onecode_provider_default__'
 
 export function ProjectUpsertModal({
   open,
@@ -134,17 +143,21 @@ export function ProjectUpsertModal({
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">工具类型</div>
-            <select
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            <Select
               value={form.toolType}
-              onChange={(e) =>
-                setForm((s) => ({ ...s, toolType: e.target.value as ToolType }))
+              onValueChange={(value) =>
+                setForm((s) => ({ ...s, toolType: value as ToolType }))
               }
               disabled={loading}
             >
-              <option value="Codex">Codex</option>
-              <option value="ClaudeCode">Claude Code</option>
-            </select>
+              <SelectTrigger className="h-9 w-full bg-background px-3 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Codex">Codex</SelectItem>
+                <SelectItem value="ClaudeCode">Claude Code</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-1">
@@ -169,24 +182,28 @@ export function ProjectUpsertModal({
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">绑定提供商（可选）</div>
-            <select
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-              value={form.providerId ?? ''}
-              onChange={(e) =>
+            <Select
+              value={form.providerId ?? providerDefaultSentinel}
+              onValueChange={(value) =>
                 setForm((s) => ({
                   ...s,
-                  providerId: e.target.value ? e.target.value : null,
+                  providerId: value === providerDefaultSentinel ? null : value,
                 }))
               }
               disabled={loading}
             >
-              <option value="">默认配置</option>
-              {filteredProviders.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.requestType})
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className="h-9 w-full bg-background px-3 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={providerDefaultSentinel}>默认配置</SelectItem>
+                {filteredProviders.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name} ({p.requestType})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {form.toolType === 'ClaudeCode' ? (
               <div className="text-xs text-muted-foreground">
                 Claude Code 仅支持 Anthropic 兼容提供商
@@ -233,4 +250,3 @@ export function ProjectUpsertModal({
     </Modal>
   )
 }
-
