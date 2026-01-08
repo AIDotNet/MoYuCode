@@ -91,6 +91,8 @@ public sealed class TerminalMuxSessionManager(ILogger<TerminalMuxSessionManager>
             return;
         }
 
+        logger.LogInformation("Closing terminal session {SessionId}.", id);
+
         TerminalMuxSession? session = null;
         try
         {
@@ -135,6 +137,14 @@ public sealed class TerminalMuxSessionManager(ILogger<TerminalMuxSessionManager>
     {
         var (appName, args) = ResolveShell(shell);
 
+        logger.LogInformation(
+            "Creating terminal session {SessionId}. Cwd={Cwd} Cols={Cols} Rows={Rows} Shell={Shell}",
+            id,
+            cwd,
+            cols,
+            rows,
+            appName);
+
         var headerBytes = Encoding.UTF8.GetBytes(id + "\n");
         if (headerBytes.Length != HeaderLength)
         {
@@ -159,6 +169,7 @@ public sealed class TerminalMuxSessionManager(ILogger<TerminalMuxSessionManager>
         }
         catch (Exception ex)
         {
+            logger.LogError(ex, "Failed to start terminal session {SessionId}.", id);
             throw new InvalidOperationException($"Failed to start terminal: {ex.Message}", ex);
         }
 
@@ -168,6 +179,8 @@ public sealed class TerminalMuxSessionManager(ILogger<TerminalMuxSessionManager>
             headerBytes,
             logger,
             onExited: () => _ = Task.Run(() => CloseAsync(id)));
+
+        logger.LogInformation("Terminal session {SessionId} started. App={App}", id, appName);
 
         session.StartPump();
         return session;

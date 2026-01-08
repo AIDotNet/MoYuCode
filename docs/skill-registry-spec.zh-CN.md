@@ -30,7 +30,7 @@
 - 根目录新增 `skills/` 目录作为配置入口。
 - 统一索引文件：`skills/index.json`。
 - 推荐目录结构：`skills/{owner}/{skill}/`，避免重名冲突。
-- `SKILL.md` 与安装包文件必须位于本仓库 `skills/{owner}/{skill}/` 下。
+- `SKILL.md` 与技能文件必须位于本仓库 `skills/{owner}/{skill}/` 下，包即目录内容。
 
 建议的索引字段（示意）：
 ```json
@@ -52,8 +52,10 @@
         "path": "skills/owner/skill/SKILL.md"
       },
       "package": {
-        "path": "skills/owner/skill/skill.zip",
-        "sha256": "..."
+        "basePath": "skills/owner/skill",
+        "files": [
+          { "path": "SKILL.md", "sha256": "..." }
+        ]
       },
       "version": "1.2.0",
       "buildId": "20260107.1",
@@ -118,14 +120,15 @@
 - `slug` 需符合 `owner/skill` 形式，建议只允许字母、数字、`-`、`_`、`.`。
 - `visibility` 取值限定为 `public`、`org`、`unlisted`。
 - `skillMd.path` 必填，且必须位于 `skills/{owner}/{skill}/SKILL.md`。
-- `package.path` 必填，且必须位于 `skills/{owner}/{skill}/`，仅允许 `zip` 或 `tar.gz`。
-- `package.sha256` 必填，用于安装前校验。
+- `package.basePath` 必填，且必须是 `skills/{owner}/{skill}`。
+- `package.files` 必填，元素包含 `path` 与 `sha256`。
+- `package.files[].path` 必须相对 `basePath`，且不允许跨目录引用。
 - `version` 必填，建议语义化；`buildId` 与 `updatedAt` 必填。
 - `status` 取值限定为 `active` 或 `yanked`。
 
 ## 13. 同版本覆盖策略细则
 - 允许覆盖同版本，但必须更新 `buildId` 与 `updatedAt`。
-- 覆盖同版本时需更新 `package.sha256`，并提示“此版本已更新”。
+- 覆盖同版本时需更新 `package.files[].sha256`，并提示“此版本已更新”。
 - 客户端若检测 `version` 相同但 `buildId` 不同，视为“同版本更新”。
 - `yanked` 版本不可安装；若恢复为 `active`，需更新 `buildId` 与 `updatedAt`。
 
@@ -155,8 +158,10 @@
         "path": "skills/onecode/hello-skill/SKILL.md"
       },
       "package": {
-        "path": "skills/onecode/hello-skill/skill.zip",
-        "sha256": "REPLACE_WITH_SHA256"
+        "basePath": "skills/onecode/hello-skill",
+        "files": [
+          { "path": "SKILL.md", "sha256": "REPLACE_WITH_SHA256" }
+        ]
       },
       "version": "1.0.0",
       "buildId": "20260107.1",
@@ -174,7 +179,8 @@ skills/
   onecode/
     hello-skill/
       SKILL.md
-      skill.zip
+      scripts/
+        hello.ps1
 ```
 
 ## 17. OneCode 本地技能管理交互与状态流转

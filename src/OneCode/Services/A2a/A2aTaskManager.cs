@@ -253,6 +253,13 @@ public sealed class A2aTaskManager
             request,
             request.ToolType == ToolType.ClaudeCode ? "工具类型：Claude Code" : "工具类型：Codex");
 
+        _logger.LogInformation(
+            "A2A task submitted. TaskId={TaskId} ToolType={ToolType} ContextId={ContextId} Cwd={Cwd}",
+            request.TaskId,
+            request.ToolType,
+            request.ContextId,
+            request.Cwd);
+
         state.RunningTask = Task.Run(
             () => request.ToolType == ToolType.ClaudeCode
                 ? RunClaudeTurnAsync(state, request)
@@ -283,6 +290,11 @@ public sealed class A2aTaskManager
             turnId = state.TurnId;
         }
 
+        _logger.LogInformation(
+            "A2A task cancel requested. TaskId={TaskId} ToolType={ToolType}",
+            taskId,
+            toolType);
+
         if (toolType == ToolType.ClaudeCode)
         {
             if (activeProcess is null)
@@ -297,6 +309,7 @@ public sealed class A2aTaskManager
                     activeProcess.Kill(entireProcessTree: true);
                 }
 
+                _logger.LogInformation("A2A task cancelled. TaskId={TaskId}", taskId);
                 return true;
             }
             catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException
@@ -323,6 +336,7 @@ public sealed class A2aTaskManager
                 },
                 cancellationToken);
 
+            _logger.LogInformation("A2A task interruption requested. TaskId={TaskId}", taskId);
             return true;
         }
         catch (Exception ex)
@@ -340,6 +354,13 @@ public sealed class A2aTaskManager
 
         try
         {
+            _logger.LogInformation(
+                "A2A task starting Codex turn. TaskId={TaskId} ContextId={ContextId} Cwd={Cwd} Model={Model}",
+                request.TaskId,
+                request.ContextId,
+                request.Cwd,
+                request.Model);
+
             SetTaskState(state, "TASK_STATE_WORKING");
             AppendResult(
                 state,
@@ -378,6 +399,11 @@ public sealed class A2aTaskManager
                 state.ThreadId = thread.ThreadId;
             }
 
+            _logger.LogInformation(
+                "A2A task Codex thread ready. TaskId={TaskId} ThreadId={ThreadId}",
+                request.TaskId,
+                thread.ThreadId);
+
             AppendSystemLog(state, request, $"Thread 已就绪：{thread.ThreadId}");
 
             if (IsCancelRequested(state))
@@ -408,10 +434,19 @@ public sealed class A2aTaskManager
                 state.TurnId = turnId;
             }
 
+            _logger.LogInformation(
+                "A2A task Codex turn started. TaskId={TaskId} TurnId={TurnId}",
+                request.TaskId,
+                turnId);
+
             AppendSystemLog(state, request, $"Turn 已开始：{turnId}");
 
             if (ShouldInterruptAfterStart(state))
             {
+                _logger.LogInformation(
+                    "A2A task Codex turn interrupted after start. TaskId={TaskId} TurnId={TurnId}",
+                    request.TaskId,
+                    turnId);
                 _ = await _codexClient.CallAsync(
                     method: "turn/interrupt",
                     @params: new
@@ -584,6 +619,13 @@ public sealed class A2aTaskManager
 
         try
         {
+            _logger.LogInformation(
+                "A2A task starting Claude turn. TaskId={TaskId} ContextId={ContextId} SessionId={SessionId} Cwd={Cwd}",
+                request.TaskId,
+                request.ContextId,
+                sessionId,
+                request.Cwd);
+
             SetTaskState(state, "TASK_STATE_WORKING");
             AppendResult(
                 state,
@@ -616,6 +658,10 @@ public sealed class A2aTaskManager
             if (runResult.SessionNotFound)
             {
                 AppendSystemLog(state, request, "未找到会话，创建新会话…");
+                _logger.LogInformation(
+                    "A2A task Claude session not found. TaskId={TaskId} SessionId={SessionId}",
+                    request.TaskId,
+                    sessionId);
                 runResult = await RunClaudeOnceAsync(state, request, sessionId, prompt, resume: false);
             }
 
@@ -664,6 +710,12 @@ public sealed class A2aTaskManager
         string prompt,
         bool resume)
     {
+        _logger.LogInformation(
+            "A2A task launching Claude Code. TaskId={TaskId} SessionId={SessionId} Resume={Resume}",
+            request.TaskId,
+            sessionId,
+            resume);
+
         var startInfo = CreateClaudeStartInfo(request, sessionId, prompt, resume);
         using var process = new Process
         {
@@ -2341,6 +2393,18 @@ public sealed class A2aTaskManager
         {
             return;
         }
+
+        var preview = messageText.ReplaceLineEndings(" ");
+        if (preview.Length > 200)
+        {
+            preview = preview[..200] + "...";
+        }
+
+        _logger.LogInformation(
+            "A2A task finalized. TaskId={TaskId} State={State} MessagePreview={MessagePreview}",
+            request.TaskId,
+            mappedState,
+            preview);
 
         AppendResult(
             state,

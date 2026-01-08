@@ -15,6 +15,10 @@
         <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.1" />
         <PackageReference Include="Quick.PtyNet" Version="1.0.3" />
         <PackageReference Include="Quick.PtyNet.WinPty" Version="1.0.1" />
+        <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
+        <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.0" />
+        <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+        <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
     </ItemGroup>
 
     <ItemGroup>

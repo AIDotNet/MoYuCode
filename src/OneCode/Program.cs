@@ -1,4 +1,5 @@
 using OneCode;
+using Serilog;
 
 try
 {
@@ -7,10 +8,11 @@ try
 }
 catch (Exception e)
 {
-    Console.WriteLine(e);
+    Log.Fatal(e, "Host terminated unexpectedly.");
 }
 finally
 {
+    Log.CloseAndFlush();
     Console.WriteLine("Press any key to exit.");
     Console.ResetColor();
 }

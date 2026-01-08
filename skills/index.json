@@ -1,5 +1,30 @@
 {
   "version": 1,
   "generatedAt": "2026-01-07",
-  "skills": []
+  "skills": [
+    {
+      "slug": "onecode/hello-skill",
+      "name": "Hello Skill",
+      "summary": "A minimal example skill for OneCode.",
+      "visibility": "public",
+      "tags": ["example", "template"],
+      "services": {
+        "codex": { "compatible": true },
+        "claudecode": { "compatible": true }
+      },
+      "skillMd": {
+        "path": "skills/onecode/hello-skill/SKILL.md"
+      },
+      "package": {
+        "basePath": "skills/onecode/hello-skill",
+        "files": [
+          { "path": "SKILL.md", "sha256": "c63046d4469ab930f41bda6519ea0c20955b04dd0db262874789ee3acb40064e" }
+        ]
+      },
+      "version": "1.0.0",
+      "buildId": "20260107.1",
+      "status": "active",
+      "updatedAt": "2026-01-07T00:00:00Z"
+    }
+  ]
 }

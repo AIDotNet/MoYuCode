@@ -51,6 +51,15 @@ public sealed class JobManager(ILogger<JobManager> logger)
     {
         state.MarkRunning();
         state.AddLog($"$ {fileName} {arguments}");
+        var resolvedWorkingDirectory = workingDirectory ?? Environment.CurrentDirectory;
+
+        logger.LogInformation(
+            "Job {JobId} ({Kind}) starting: {FileName} {Arguments} (WorkingDirectory={WorkingDirectory})",
+            state.Id,
+            state.Kind,
+            fileName,
+            arguments,
+            resolvedWorkingDirectory);
 
         try
         {
@@ -59,7 +68,7 @@ public sealed class JobManager(ILogger<JobManager> logger)
             {
                 FileName = fileName,
                 Arguments = arguments,
-                WorkingDirectory = workingDirectory ?? Environment.CurrentDirectory,
+                WorkingDirectory = resolvedWorkingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -83,7 +92,21 @@ public sealed class JobManager(ILogger<JobManager> logger)
 
             await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
 
-            state.MarkFinished(process.ExitCode);
+            var exitCode = process.ExitCode;
+            state.MarkFinished(exitCode);
+
+            if (exitCode == 0)
+            {
+                logger.LogInformation("Job {JobId} ({Kind}) finished with exit code 0.", state.Id, state.Kind);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Job {JobId} ({Kind}) finished with exit code {ExitCode}.",
+                    state.Id,
+                    state.Kind,
+                    exitCode);
+            }
         }
         catch (Exception ex)
         {

@@ -6,6 +6,8 @@ using OneCode.Services.A2a;
 using OneCode.Services.Codex;
 using OneCode.Services.Jobs;
 using OneCode.Services.Shell;
+using Serilog;
+using Serilog.Events;
 
 namespace OneCode;
 
@@ -17,6 +19,24 @@ public static class OneCodeApp
     {
         args ??= Array.Empty<string>();
         var builder = WebApplication.CreateBuilder(args);
+
+        var logDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OneCode",
+            "logs");
+        Directory.CreateDirectory(logDirectory);
+        var errorLogPath = Path.Combine(logDirectory, "onecode-error-.log");
+
+        builder.Host.UseSerilog((context, _, loggerConfiguration) =>
+        {
+            loggerConfiguration
+                .ReadFrom.Configuration(context.Configuration)
+                .WriteTo.File(
+                    errorLogPath,
+                    restrictedToMinimumLevel: LogEventLevel.Error,
+                    rollingInterval: RollingInterval.Day,
+                    retainedFileCountLimit: 14);
+        });
 
         var hasUrls = !string.IsNullOrWhiteSpace(builder.Configuration["urls"])
             || !string.IsNullOrWhiteSpace(builder.Configuration["ASPNETCORE_URLS"]);
@@ -115,6 +135,7 @@ public static class OneCodeApp
         }
 
         app.UseCors();
+        app.UseSerilogRequestLogging();
         app.UseWebSockets();
 
         // Map all endpoints with /api prefix
