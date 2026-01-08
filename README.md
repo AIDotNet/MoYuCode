@@ -213,3 +213,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Inspired by [ZCode](https://zcode.dev/)
 - Built with [OpenAI Codex](https://github.com/openai/codex) and [Anthropic Claude Code](https://claude.ai/code)
+
+Community WeChat：wk28u9123456789

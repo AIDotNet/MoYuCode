@@ -16,6 +16,7 @@ import type {
   RenameEntryRequest,
   RenameEntryResponse,
   ProviderDto,
+  ProviderModelUpdateRequest,
   ProviderUpsertRequest,
   ToolKey,
   ToolStatusDto,
@@ -146,6 +147,16 @@ export const api = {
     delete: (id: string) => http<void>(`/api/providers/${id}`, { method: 'DELETE' }),
     refreshModels: (id: string) =>
       http<ProviderDto>(`/api/providers/${id}/refresh-models`, { method: 'POST' }),
+    addModel: (id: string, body: ProviderModelUpdateRequest) =>
+      http<ProviderDto>(`/api/providers/${id}/models`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    removeModel: (id: string, model: string) =>
+      http<ProviderDto>(
+        `/api/providers/${id}/models?model=${encodeURIComponent(model)}`,
+        { method: 'DELETE' },
+      ),
   },
   projects: {
     list: (toolType: ToolType) =>
@@ -193,8 +204,14 @@ export const api = {
       http<ListEntriesResponse>(`/api/fs/entries?path=${encodeURIComponent(path)}`),
     hasGitRepo: (path: string) =>
       http<boolean>(`/api/fs/has-git?path=${encodeURIComponent(path)}`),
-    readFile: (path: string) =>
-      http<ReadFileResponse>(`/api/fs/file?path=${encodeURIComponent(path)}`),
+    readFile: (path: string, opts?: { offset?: number; limit?: number }) => {
+      const sp = new URLSearchParams()
+      sp.set('path', path)
+      if (opts?.offset != null) sp.set('offset', String(opts.offset))
+      if (opts?.limit != null) sp.set('limit', String(opts.limit))
+      const suffix = sp.toString()
+      return http<ReadFileResponse>(`/api/fs/file?${suffix}`)
+    },
     writeFile: (body: WriteFileRequest) =>
       http<void>(`/api/fs/file`, { method: 'PUT', body: JSON.stringify(body) }),
     deleteEntry: (path: string) =>

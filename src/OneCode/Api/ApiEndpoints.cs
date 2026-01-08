@@ -1426,6 +1426,72 @@ public static class ApiEndpoints
 
             return ToDto(entity);
         });
+
+        providers.MapPost("/{id:guid}/models", async (Guid id, [FromBody] ProviderModelUpdateRequest request, JsonDataStore store) =>
+        {
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
+            if (entity is null)
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
+            }
+
+            var model = (request.Model ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Model is required.");
+            }
+
+            if (model.Length > 200)
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Model name is too long.");
+            }
+
+            if (!entity.Models.Any(m => string.Equals(m, model, StringComparison.OrdinalIgnoreCase)))
+            {
+                entity.Models.Add(model);
+                entity.Models = entity.Models
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(x => x, StringComparer.Ordinal)
+                    .ToList();
+            }
+
+            entity.ModelsRefreshedAtUtc = DateTimeOffset.UtcNow;
+            entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await store.SaveDataAsync();
+
+            return ToDto(entity);
+        });
+
+        providers.MapDelete("/{id:guid}/models", async (Guid id, [FromQuery] string model, JsonDataStore store) =>
+        {
+            var entity = store.Providers.FirstOrDefault(x => x.Id == id);
+            if (entity is null)
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Provider not found.");
+            }
+
+            var normalized = (model ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Model is required.");
+            }
+
+            var updated = entity.Models
+                .Where(m => !string.Equals(m, normalized, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (updated.Count == entity.Models.Count)
+            {
+                throw new ApiHttpException(StatusCodes.Status404NotFound, "Model not found.");
+            }
+
+            entity.Models = updated;
+            entity.ModelsRefreshedAtUtc = DateTimeOffset.UtcNow;
+            entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await store.SaveDataAsync();
+
+            return ToDto(entity);
+        });
     }
 
     private static void MapProjects(RouteGroupBuilder api)

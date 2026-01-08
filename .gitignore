@@ -12,3 +12,4 @@ src/OneCode/wwwroot/
 /src/OneCode/wwwroot
 node_modules
 /.vs/OneCode.slnx
+*.DotSettings.user

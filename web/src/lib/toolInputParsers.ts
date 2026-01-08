@@ -2,17 +2,29 @@ import type { TaskToolInput } from '@/components/project-workspace/tool-inputs/t
 import type { TodoWriteToolInput, TodoWriteToolTodo, TodoWriteStatus } from '@/components/project-workspace/tool-inputs/todoType'
 import type { AskUserQuestionToolInput, AskUserQuestionToolQuestion, AskUserQuestionToolOption } from '@/components/project-workspace/tool-inputs/askType'
 
-type ReadToolInput = {
+export type ReadToolInput = {
   filePath: string
   content?: string
+  offset?: number
+  limit?: number
 }
 
-type WriteToolInput = {
+export type BashToolInput = {
+  command: string
+  description?: string
+}
+
+export type GlobToolInput = {
+  pattern: string
+  path?: string
+}
+
+export type WriteToolInput = {
   filePath: string
   content: string
 }
 
-type EditToolInput = {
+export type EditToolInput = {
   filePath: string
   oldString: string
   newString: string
@@ -60,6 +72,16 @@ export function isAskUserQuestionToolName(toolName: string): boolean {
 export function isReadToolName(toolName: string): boolean {
   const baseName = getBaseToolName(toolName)
   return baseName === 'read' || baseName.endsWith('read')
+}
+
+export function isBashToolName(toolName: string): boolean {
+  const baseName = getBaseToolName(toolName)
+  return baseName === 'bash' || baseName.endsWith('bash')
+}
+
+export function isGlobToolName(toolName: string): boolean {
+  const baseName = getBaseToolName(toolName)
+  return baseName === 'glob' || baseName.endsWith('glob')
 }
 
 export function isTodoWriteToolName(toolName: string): boolean {
@@ -129,6 +151,20 @@ function readFirstNonEmptyString(obj: Record<string, unknown>, keys: string[]): 
   return null
 }
 
+function readFirstNumber(obj: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = obj[key]
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number(value)
+          : null
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
 export function tryParseWriteToolInput(input: string): WriteToolInput | null {
   const obj = tryParseJsonRecord(input)
   if (!obj) return null
@@ -171,12 +207,16 @@ export function tryParseReadToolInput(input: string): ReadToolInput | null {
   const fileValue = args.file
   let filePathFromFile: string | null = null
   let contentFromFile: string | null = null
+  let offsetFromFile: number | null = null
+  let limitFromFile: number | null = null
   if (fileValue && typeof fileValue === 'object' && !Array.isArray(fileValue)) {
     const fileObj = fileValue as Record<string, unknown>
     filePathFromFile =
       readFirstNonEmptyString(fileObj, ['file_path', 'filePath', 'path']) ??
       readFirstNonEmptyString(fileObj, ['file', 'target', 'targetPath'])
     contentFromFile = readFirstString(fileObj, ['content', 'text'])
+    offsetFromFile = readFirstNumber(fileObj, ['offset'])
+    limitFromFile = readFirstNumber(fileObj, ['limit'])
   }
 
   const filePath =
@@ -187,7 +227,44 @@ export function tryParseReadToolInput(input: string): ReadToolInput | null {
   if (!filePath) return null
 
   const content = contentFromFile ?? readFirstString(args, ['content', 'text'])
-  return { filePath, content: content ?? undefined }
+  const offset = offsetFromFile ?? readFirstNumber(args, ['offset'])
+  const limit = limitFromFile ?? readFirstNumber(args, ['limit'])
+  return {
+    filePath,
+    content: content ?? undefined,
+    offset: offset ?? undefined,
+    limit: limit ?? undefined,
+  }
+}
+
+export function tryParseBashToolInput(input: string): BashToolInput | null {
+  const obj = tryParseJsonRecord(input)
+  if (!obj) return null
+  const args = unwrapToolArgsRecord(obj)
+
+  const command = readFirstString(args, ['command', 'cmd'])
+  if (!command) return null
+
+  const description = readFirstString(args, ['description', 'desc'])
+  return {
+    command,
+    description: description ?? undefined,
+  }
+}
+
+export function tryParseGlobToolInput(input: string): GlobToolInput | null {
+  const obj = tryParseJsonRecord(input)
+  if (!obj) return null
+  const args = unwrapToolArgsRecord(obj)
+
+  const pattern = readFirstString(args, ['pattern'])
+  if (!pattern) return null
+
+  const path = readFirstString(args, ['path', 'directory', 'dir'])
+  return {
+    pattern,
+    path: path ?? undefined,
+  }
 }
 
 function normalizeTodoWriteStatus(value: unknown): TodoWriteStatus {

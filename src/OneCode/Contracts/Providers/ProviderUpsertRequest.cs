@@ -10,3 +10,5 @@ public sealed record ProviderUpsertRequest(
     ProviderRequestType RequestType,
     string? AzureApiVersion);
 
+public sealed record ProviderModelUpdateRequest(string Model);
+

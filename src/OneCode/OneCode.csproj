@@ -6,8 +6,8 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
-        <Version>0.0.2.1</Version>
-        <AssemblyVersion>0.0.2.1</AssemblyVersion>
+        <Version>0.0.2.2</Version>
+        <AssemblyVersion>0.0.2.2</AssemblyVersion>
     </PropertyGroup>
 
     <ItemGroup>

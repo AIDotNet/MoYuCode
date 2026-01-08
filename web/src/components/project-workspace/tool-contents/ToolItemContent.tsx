@@ -5,6 +5,8 @@ import { TaskToolContent } from '@/components/project-workspace/tool-contents/Ta
 import { WriteToolContent } from '@/components/project-workspace/tool-contents/WriteToolContent'
 import { ReadToolContent } from '@/components/project-workspace/tool-contents/ReadToolContent'
 import { EditToolContent } from '@/components/project-workspace/tool-contents/EditToolContent'
+import { BashToolContent } from '@/components/project-workspace/tool-contents/BashToolContent'
+import { GlobToolContent } from '@/components/project-workspace/tool-contents/GlobToolContent'
 import { DefaultToolContent } from '@/components/project-workspace/tool-contents/DefaultToolContent'
 import { ToolOutputContent } from '@/components/project-workspace/tool-contents/ToolOutputContent'
 import type { ToolInputData } from '@/components/project-workspace/tool-inputs/useToolInputParsers'
@@ -33,11 +35,13 @@ export const ToolItemContent = memo(function ToolItemContent({
   askUserQuestionDisabled,
   onSubmitAskUserQuestion,
 }: ToolItemContentProps) {
-  const { taskInput, askInput, writeInput, readInput, editInput, todoWriteInput } = inputData
+  const { taskInput, askInput, writeInput, readInput, editInput, todoWriteInput, bashInput, globInput } = inputData
 
   const shouldShowOutput = Boolean(
     output &&
     !editInput &&
+    !bashInput &&
+    !globInput &&
     (!todoWriteInput || isError) &&
     (!readInput || isError) &&
     (!taskInput || isError)
@@ -64,6 +68,10 @@ export const ToolItemContent = memo(function ToolItemContent({
         <ReadToolContent input={readInput} code={readCode ?? ''} />
       ) : editInput ? (
         <EditToolContent input={editInput} diff={editDiff} />
+      ) : bashInput ? (
+        <BashToolContent input={bashInput} output={output} />
+      ) : globInput ? (
+        <GlobToolContent input={globInput} output={output} />
       ) : todoWriteInput ? (
         <ClaudeTodoWriteTool input={todoWriteInput} />
       ) : (

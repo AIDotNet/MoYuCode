@@ -15,7 +15,6 @@ import {
   truncateInlineText,
 } from '@/lib/toolUtils'
 import type { OpenById } from '@/components/project-workspace/ProjectChat'
-import type { ToolType } from '@/api/types'
 
 interface ChatMessage {
   id: string
@@ -28,7 +27,6 @@ interface ChatMessage {
 
 interface ChatToolCallItemProps {
   message: ChatMessage
-  toolType: ToolType
   openById: OpenById
   onToggle: (id: string) => void
   onSubmitAskUserQuestion?: (toolUseId: string, answers: Record<string, string>, messageId: string) => void
@@ -37,7 +35,6 @@ interface ChatToolCallItemProps {
 
 export const ChatToolCallItem = memo(function ChatToolCallItem({
   message,
-  toolType,
   openById,
   onToggle,
   onSubmitAskUserQuestion,
@@ -86,6 +83,12 @@ export const ChatToolCallItem = memo(function ChatToolCallItem({
     if (inputData.readInput) {
       return `Read ${getBaseName(inputData.readInput.filePath)}`
     }
+    if (inputData.bashInput) {
+      return 'Bash'
+    }
+    if (inputData.globInput) {
+      return 'Glob'
+    }
     if (inputData.taskInput) {
       return `Task${inputData.taskInput.subagentType ? ` ${inputData.taskInput.subagentType}` : ''}`
     }
@@ -107,6 +110,12 @@ export const ChatToolCallItem = memo(function ChatToolCallItem({
     }
     if (inputData.readInput) {
       return truncateInlineText(inputData.readInput.filePath, 140)
+    }
+    if (inputData.bashInput) {
+      return truncateInlineText(inputData.bashInput.description || inputData.bashInput.command, 140)
+    }
+    if (inputData.globInput) {
+      return truncateInlineText(inputData.globInput.pattern, 140)
     }
     if (inputData.taskInput) {
       return truncateInlineText(inputData.taskInput.description || inputData.taskInput.prompt || inputData.taskInput.subagentType, 140)

@@ -379,9 +379,16 @@ public sealed class A2aTaskManager
                             parts = new[] { new { text = "starting" } },
                         },
                         final: false),
-                });
+            });
 
             AppendSystemLog(state, request, "准备启动 Codex（app-server）…");
+            if (request.ProviderId.HasValue && !string.IsNullOrWhiteSpace(request.ProviderApiKey))
+            {
+                await _codexClient.EnsureProviderKeyAsync(
+                    request.ProviderId.Value,
+                    request.ProviderApiKey!,
+                    CancellationToken.None);
+            }
             var modelProvider = GetCodexModelProvider(request);
             if (!string.IsNullOrWhiteSpace(modelProvider))
             {
@@ -486,7 +493,19 @@ public sealed class A2aTaskManager
             return null;
         }
 
-        return $"onecode-{request.ProviderId.Value:N}";
+        var baseKey = $"onecode-{request.ProviderId.Value:N}";
+        if (!request.ProviderRequestType.HasValue)
+        {
+            return baseKey;
+        }
+
+        var suffix = request.ProviderRequestType.Value.ToString();
+        if (string.IsNullOrWhiteSpace(suffix))
+        {
+            return baseKey;
+        }
+
+        return $"{baseKey}-{suffix.ToLowerInvariant()}";
     }
 
     private async Task UpsertCodexModelProviderAsync(
@@ -2045,6 +2064,7 @@ public sealed class A2aTaskManager
         var assistantText = state.AssistantText;
         var reasoningText = state.ReasoningText;
         var toolOutputText = state.ToolOutputText;
+        var seenToolOutputs = new HashSet<string>(StringComparer.Ordinal);
 
         await foreach (var ev in events.ReadAllAsync(cancellationToken))
         {
@@ -2145,6 +2165,219 @@ public sealed class A2aTaskManager
                     },
                 });
 
+            string? ReadTextFromContent(JsonElement item)
+            {
+                if (item.ValueKind != JsonValueKind.Object
+                    || !item.TryGetProperty("content", out var content)
+                    || content.ValueKind != JsonValueKind.Array)
+                {
+                    return null;
+                }
+
+                var builder = new StringBuilder();
+                foreach (var part in content.EnumerateArray())
+                {
+                    if (part.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    var partType = TryReadString(part, "type") ?? string.Empty;
+                    if (!string.Equals(partType, "text", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var partText = TryReadString(part, "text") ?? string.Empty;
+                    builder.Append(partText);
+                }
+
+                var text = builder.ToString();
+                return string.IsNullOrWhiteSpace(text) ? null : text;
+            }
+
+            void MergeAgentMessage(string? message)
+            {
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    return;
+                }
+
+                string? delta = null;
+                lock (state.Sync)
+                {
+                    var current = assistantText.ToString();
+                    if (string.IsNullOrEmpty(current))
+                    {
+                        assistantText.Append(message);
+                        delta = message;
+                    }
+                    else if (message.StartsWith(current, StringComparison.Ordinal))
+                    {
+                        delta = message[current.Length..];
+                        if (!string.IsNullOrEmpty(delta))
+                        {
+                            assistantText.Append(delta);
+                        }
+                    }
+                    else if (!string.Equals(current, message, StringComparison.Ordinal))
+                    {
+                        assistantText.Clear();
+                        assistantText.Append(message);
+                    }
+                }
+
+                if (string.IsNullOrEmpty(delta))
+                {
+                    return;
+                }
+
+                AppendResult(
+                    state,
+                    new
+                    {
+                        statusUpdate = BuildStatusUpdate(
+                            taskId: request.TaskId,
+                            contextId: request.ContextId,
+                            state: "TASK_STATE_WORKING",
+                            message: new
+                            {
+                                role = "agent",
+                                messageId = request.AgentMessageId,
+                                taskId = request.TaskId,
+                                contextId = request.ContextId,
+                                parts = new[] { new { text = delta } },
+                            },
+                            final: false),
+                    });
+            }
+
+            string? ReadToolOutputFromResult(JsonElement result)
+            {
+                if (result.ValueKind != JsonValueKind.Object)
+                {
+                    return null;
+                }
+
+                var normalized = result;
+                if (normalized.TryGetProperty("Ok", out var okValue) && okValue.ValueKind == JsonValueKind.Object)
+                {
+                    normalized = okValue;
+                }
+                else if (normalized.TryGetProperty("ok", out var okLower) && okLower.ValueKind == JsonValueKind.Object)
+                {
+                    normalized = okLower;
+                }
+                else if (normalized.TryGetProperty("Err", out var errValue) && errValue.ValueKind == JsonValueKind.Object)
+                {
+                    normalized = errValue;
+                }
+                else if (normalized.TryGetProperty("error", out var errorValue) && errorValue.ValueKind == JsonValueKind.Object)
+                {
+                    normalized = errorValue;
+                }
+
+                var text = ReadTextFromContent(normalized);
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return null;
+                }
+
+                var trimmed = text.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed))
+                {
+                    return null;
+                }
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(trimmed);
+                    var root = doc.RootElement;
+                    if (root.ValueKind == JsonValueKind.Object)
+                    {
+                        var stdout = TryReadString(root, "stdout") ?? string.Empty;
+                        var stderr = TryReadString(root, "stderr") ?? string.Empty;
+
+                        if (!string.IsNullOrWhiteSpace(stdout) || !string.IsNullOrWhiteSpace(stderr))
+                        {
+                            if (!string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
+                            {
+                                return $"{stdout}\n{stderr}";
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(stdout))
+                            {
+                                return stdout;
+                            }
+
+                            return stderr;
+                        }
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Fall back to raw text.
+                }
+
+                return text;
+            }
+
+            void AppendToolOutput(string output)
+            {
+                if (string.IsNullOrWhiteSpace(output))
+                {
+                    return;
+                }
+
+                var normalized = output
+                    .Replace("\r\n", "\n", StringComparison.Ordinal)
+                    .Replace('\r', '\n');
+                if (!normalized.EndsWith('\n'))
+                {
+                    normalized += "\n";
+                }
+
+                lock (state.Sync)
+                {
+                    toolOutputText.Append(normalized);
+                }
+
+                AppendResult(
+                    state,
+                    new
+                    {
+                        artifactUpdate = BuildTextArtifactUpdate(
+                            taskId: request.TaskId,
+                            contextId: request.ContextId,
+                            artifactId: $"artifact-tool-{request.TaskId}",
+                            name: "tool-output",
+                            text: normalized,
+                            append: true,
+                            lastChunk: false),
+                    });
+            }
+
+            void AppendToolOutputFromResult(string? callId, JsonElement result)
+            {
+                var output = ReadToolOutputFromResult(result);
+                if (string.IsNullOrWhiteSpace(output))
+                {
+                    return;
+                }
+
+                var prefix = output.Length <= 256 ? output : output[..256];
+                var dedupeKey = string.IsNullOrWhiteSpace(callId)
+                    ? $"text:{output.Length}:{prefix}"
+                    : $"call:{callId}:{output.Length}:{prefix}";
+
+                if (!seenToolOutputs.Add(dedupeKey))
+                {
+                    return;
+                }
+
+                AppendToolOutput(output);
+            }
+
             switch (msgMethod)
             {
                 case "item/agentMessage/delta":
@@ -2174,6 +2407,67 @@ public sealed class A2aTaskManager
                                 final: false),
                         });
 
+                    break;
+                }
+
+                case "codex/event/agent_message":
+                {
+                    var message = TryReadString(msgParams, "msg", "message")
+                        ?? TryReadString(msgParams, "msg", "text");
+                    MergeAgentMessage(message);
+                    break;
+                }
+
+                case "codex/event/task_complete":
+                {
+                    var message = TryReadString(msgParams, "msg", "last_agent_message")
+                        ?? TryReadString(msgParams, "msg", "lastAgentMessage");
+                    MergeAgentMessage(message);
+                    break;
+                }
+
+                case "codex/event/mcp_tool_call_end":
+                {
+                    var msg = TryGetObject(msgParams, "msg");
+                    var callId = TryReadString(msg, "call_id")
+                        ?? TryReadString(msg, "callId")
+                        ?? TryReadString(msg, "id");
+                    var result = TryGetObject(msg, "result");
+                    AppendToolOutputFromResult(callId, result);
+                    break;
+                }
+
+                case "item/completed":
+                {
+                    var item = TryGetObject(msgParams, "item");
+                    var itemType = TryReadString(item, "type") ?? string.Empty;
+                    if (string.Equals(itemType, "mcpToolCall", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var callId = TryReadString(item, "id");
+                        var result = TryGetObject(item, "result");
+                        AppendToolOutputFromResult(callId, result);
+                        break;
+                    }
+
+                    if (string.Equals(itemType, "agentMessage", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var message = TryReadString(item, "text") ?? ReadTextFromContent(item);
+                        MergeAgentMessage(message);
+                    }
+
+                    break;
+                }
+
+                case "codex/event/item_completed":
+                {
+                    var item = TryGetObject(msgParams, "msg");
+                    item = TryGetObject(item, "item");
+                    var itemType = TryReadString(item, "type") ?? string.Empty;
+                    if (string.Equals(itemType, "agentMessage", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var message = TryReadString(item, "text") ?? ReadTextFromContent(item);
+                        MergeAgentMessage(message);
+                    }
                     break;
                 }
 

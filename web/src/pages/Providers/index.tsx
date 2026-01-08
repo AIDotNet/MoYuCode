@@ -530,9 +530,17 @@ function IconPickerModalBody({
   )
 }
 
-type BusyState = null | 'load' | 'save' | 'refreshModels' | 'delete'
+type BusyState =
+  | null
+  | 'load'
+  | 'save'
+  | 'refreshModels'
+  | 'delete'
+  | 'addModel'
+  | 'removeModel'
 
 const emptyModels: string[] = []
+const maxModelNameLength = 200
 
 export default function Providers() {
   const [providers, setProviders] = useState<ProviderDto[]>([])
@@ -576,6 +584,10 @@ export default function Providers() {
   const [showApiKey, setShowApiKey] = useState(false)
 
   const [modelQuery, setModelQuery] = useState('')
+  const [addModelOpen, setAddModelOpen] = useState(false)
+  const [addModelDraft, setAddModelDraft] = useState('')
+  const [addModelError, setAddModelError] = useState<string | null>(null)
+  const [removeModelTarget, setRemoveModelTarget] = useState<string | null>(null)
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
@@ -941,6 +953,70 @@ export default function Providers() {
       // ignore
     }
   }, [])
+
+  const openAddModelDialog = useCallback(() => {
+    setAddModelDraft('')
+    setAddModelError(null)
+    setAddModelOpen(true)
+  }, [])
+
+  const addModel = useCallback(async () => {
+    if (!selectedProvider) {
+      setAddModelError('请先保存提供商')
+      return
+    }
+
+    const model = addModelDraft.trim()
+    if (!model) {
+      setAddModelError('请输入模型名称')
+      return
+    }
+
+    if (model.length > maxModelNameLength) {
+      setAddModelError('模型名称过长')
+      return
+    }
+
+    const lower = model.toLowerCase()
+    const exists = selectedProvider.models.some(
+      (existing) => existing.toLowerCase() === lower,
+    )
+    if (exists) {
+      setAddModelError('模型已存在')
+      return
+    }
+
+    setBusy('addModel')
+    setError(null)
+    setAddModelError(null)
+    try {
+      await api.providers.addModel(selectedProvider.id, { model })
+      await load()
+      setAddModelOpen(false)
+      setAddModelDraft('')
+    } catch (e) {
+      setAddModelError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }, [addModelDraft, load, selectedProvider])
+
+  const removeModel = useCallback(
+    async (model: string) => {
+      if (!selectedProvider) return
+      setBusy('removeModel')
+      setError(null)
+      try {
+        await api.providers.removeModel(selectedProvider.id, model)
+        await load()
+      } catch (e) {
+        setError((e as Error).message)
+      } finally {
+        setBusy(null)
+      }
+    },
+    [load, selectedProvider],
+  )
 
   const models = selectedProvider?.models ?? emptyModels
   const filteredModels = useMemo(() => {
@@ -1427,19 +1503,34 @@ export default function Providers() {
             <div className="flex min-h-0 flex-1 flex-col gap-2">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium">模型</div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void refreshModels()}
-                  disabled={loading || !selectedProvider}
-                  title={
-                    selectedProvider ? '拉取 /models 并更新缓存' : '请先保存配置'
-                  }
-                >
-                  <RefreshCcw className="mr-2 size-4" />
-                  拉取模型
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={openAddModelDialog}
+                    disabled={loading || !selectedProvider}
+                    title={
+                      selectedProvider ? '手动添加模型到缓存' : '请先保存配置'
+                    }
+                  >
+                    <Plus className="mr-2 size-4" />
+                    新增模型
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void refreshModels()}
+                    disabled={loading || !selectedProvider}
+                    title={
+                      selectedProvider ? '拉取 /models 并更新缓存' : '请先保存配置'
+                    }
+                  >
+                    <RefreshCcw className="mr-2 size-4" />
+                    拉取模型
+                  </Button>
+                </div>
               </div>
 
               <div className="relative">
@@ -1461,7 +1552,7 @@ export default function Providers() {
                       : '（未拉取）'}
                     {selectedProvider.modelsRefreshedAtUtc ? (
                       <span className="ml-2">
-                        刷新于 {formatUtc(selectedProvider.modelsRefreshedAtUtc)}
+                        更新于 {formatUtc(selectedProvider.modelsRefreshedAtUtc)}
                       </span>
                     ) : null}
                   </div>
@@ -1488,18 +1579,32 @@ export default function Providers() {
                                     <div className="min-w-0 flex-1 truncate">
                                       {m}
                                     </div>
-                                    <button
-                                      type="button"
-                                      className={cn(
-                                        'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground',
-                                        copiedKey === m && 'text-foreground',
-                                      )}
-                                      onClick={() => void copyToClipboard(m, m)}
-                                      title="复制模型名"
-                                    >
-                                      <Copy className="size-3.5" />
-                                      {copiedKey === m ? '已复制' : '复制'}
-                                    </button>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground',
+                                          copiedKey === m && 'text-foreground',
+                                        )}
+                                        onClick={() => void copyToClipboard(m, m)}
+                                        title="复制模型名"
+                                      >
+                                        <Copy className="size-3.5" />
+                                        {copiedKey === m ? '已复制' : '复制'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-destructive',
+                                        )}
+                                        onClick={() => setRemoveModelTarget(m)}
+                                        title="删除模型"
+                                        disabled={loading}
+                                      >
+                                        <Trash2 className="size-3.5" />
+                                        删除
+                                      </button>
+                                    </div>
                                   </div>
                                 ))}
                               </div>
@@ -1680,6 +1785,62 @@ export default function Providers() {
           </div>
         </Modal>
 
+        <Modal
+          open={addModelOpen}
+          title="新增模型"
+          onClose={() => {
+            setAddModelOpen(false)
+            setAddModelDraft('')
+            setAddModelError(null)
+          }}
+          className="max-w-lg"
+        >
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">
+              将模型添加到当前提供商缓存（最多 {maxModelNameLength} 个字符）。
+            </div>
+            <Input
+              autoFocus
+              value={addModelDraft}
+              onChange={(e) => {
+                setAddModelDraft(e.target.value)
+                if (addModelError) setAddModelError(null)
+              }}
+              disabled={loading}
+              placeholder="例如：gpt-5.1-codex-max"
+            />
+            {addModelError ? (
+              <div className="text-sm text-destructive">{addModelError}</div>
+            ) : null}
+            {!selectedProvider ? (
+              <div className="text-xs text-muted-foreground">
+                请先保存提供商配置后再新增模型。
+              </div>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setAddModelOpen(false)
+                  setAddModelDraft('')
+                  setAddModelError(null)
+                }}
+                disabled={loading}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void addModel()}
+                disabled={loading || !selectedProvider}
+              >
+                添加
+              </Button>
+            </div>
+          </div>
+        </Modal>
+
         <IconPickerModal
           open={iconPickerTarget !== null}
           value={
@@ -1695,6 +1856,36 @@ export default function Providers() {
             if (iconPickerTarget === 'edit') setCustomLogo(next)
           }}
         />
+
+        <AlertDialog
+          open={removeModelTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setRemoveModelTarget(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认删除模型</AlertDialogTitle>
+              <AlertDialogDescription>
+                确定删除模型「{removeModelTarget ?? ''}」？
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={loading}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={loading || !selectedProvider || !removeModelTarget}
+                className={buttonVariants({ variant: 'destructive' })}
+                onClick={() => {
+                  const target = removeModelTarget
+                  setRemoveModelTarget(null)
+                  if (target) void removeModel(target)
+                }}
+              >
+                删除
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <AlertDialog
           open={deleteDialogOpen}

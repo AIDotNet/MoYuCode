@@ -16,13 +16,11 @@ import ReactMarkdown from 'react-markdown'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import { api } from '@/api/client'
-import type { ProjectDto, ProjectSessionMessageDto, ProviderDto, ToolType } from '@/api/types'
+import type { ProjectDto, ProjectSessionMessageDto, ProviderDto } from '@/api/types'
 import type { CodeSelection, WorkspaceFileRef } from '@/lib/chatPromptXml'
 import { buildUserPromptWithWorkspaceContext } from '@/lib/chatWorkspaceContextXml'
 import { cn } from '@/lib/utils'
 import { getVscodeFileIconUrl } from '@/lib/vscodeFileIcons'
-import { DiffViewer } from '@/components/DiffViewer'
-import { MonacoCode } from '@/components/MonacoCode'
 import { ShikiCode } from '@/components/ShikiCode'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/ui/button'
@@ -48,8 +46,8 @@ import { Check, ChevronDown, Eye, EyeOff, Image as ImageIcon, X } from 'lucide-r
 import { useRouteTool } from '@/hooks/use-route-tool'
 import { useToolInputParsers } from '@/components/project-workspace/tool-inputs/useToolInputParsers'
 import { ToolItemContent } from '@/components/project-workspace/tool-contents/ToolItemContent'
-import { ClaudeAskUserQuestionTool } from '@/components/project-workspace/ClaudeAskUserQuestionTool'
 import { ClaudeTodoWriteTool } from '@/components/project-workspace/ClaudeTodoWriteTool'
+import { tryParseTodoWriteToolInput } from '@/lib/toolInputParsers'
 
 type ChatRole = 'user' | 'agent' | 'system'
 
@@ -423,14 +421,6 @@ function tryParseJsonRecord(value: string): Record<string, unknown> | null {
   return null
 }
 
-function readFirstString(obj: Record<string, unknown>, keys: string[]): string | null {
-  for (const key of keys) {
-    const value = obj[key]
-    if (typeof value === 'string') return value
-  }
-  return null
-}
-
 function readFirstNonEmptyString(obj: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const value = obj[key]
@@ -488,166 +478,6 @@ function shouldAutoOpenClaudeTool(toolName: string): boolean {
     isReadToolName(toolName) ||
     isTodoWriteToolName(toolName)
   )
-}
-
-function unwrapToolArgsRecord(obj: Record<string, unknown>): Record<string, unknown> {
-  const tryReadRecord = (value: unknown): Record<string, unknown> | null => {
-    if (!value) return null
-    if (typeof value === 'string') return tryParseJsonRecord(value)
-    if (typeof value !== 'object' || Array.isArray(value)) return null
-    return value as Record<string, unknown>
-  }
-
-  return (
-    tryReadRecord(obj.args) ??
-    tryReadRecord(obj.arguments) ??
-    tryReadRecord(obj.toolArgs) ??
-    tryReadRecord(obj.tool_args) ??
-    tryReadRecord(obj.input) ??
-    tryReadRecord(obj.parameters) ??
-    tryReadRecord(obj.params) ??
-    obj
-  )
-}
-
-function tryParseWriteToolInput(input: string): { filePath: string; content: string } | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const filePath =
-    readFirstNonEmptyString(args, ['file_path', 'filePath', 'path']) ??
-    readFirstNonEmptyString(args, ['file', 'target', 'targetPath'])
-
-  const content = readFirstString(args, ['content', 'text'])
-
-  if (!filePath) return null
-  if (content == null) return null
-  return { filePath, content }
-}
-
-function tryParseEditToolInput(input: string): {
-  filePath: string
-  oldString: string
-  newString: string
-  replaceAll: boolean
-} | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const filePath =
-    readFirstNonEmptyString(args, ['file_path', 'filePath', 'path']) ??
-    readFirstNonEmptyString(args, ['file', 'target', 'targetPath'])
-
-  const oldString = readFirstString(args, ['old_string', 'oldString'])
-  const newString = readFirstString(args, ['new_string', 'newString'])
-  const replaceAll = args.replace_all === true || args.replaceAll === true
-
-  if (!filePath) return null
-  if (oldString == null || newString == null) return null
-  return { filePath, oldString, newString, replaceAll }
-}
-
-type ReadToolInput = {
-  filePath: string
-  content?: string
-}
-
-function tryParseReadToolInput(input: string): ReadToolInput | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const fileValue = args.file
-  let filePathFromFile: string | null = null
-  let contentFromFile: string | null = null
-  if (fileValue && typeof fileValue === 'object' && !Array.isArray(fileValue)) {
-    const fileObj = fileValue as Record<string, unknown>
-    filePathFromFile =
-      readFirstNonEmptyString(fileObj, ['file_path', 'filePath', 'path']) ??
-      readFirstNonEmptyString(fileObj, ['file', 'target', 'targetPath'])
-    contentFromFile = readFirstString(fileObj, ['content', 'text'])
-  }
-
-  const filePath =
-    filePathFromFile ??
-    readFirstNonEmptyString(args, ['file_path', 'filePath', 'path']) ??
-    readFirstNonEmptyString(args, ['file', 'target', 'targetPath'])
-
-  if (!filePath) return null
-
-  const content = contentFromFile ?? readFirstString(args, ['content', 'text'])
-  return { filePath, content: content ?? undefined }
-}
-
-type TodoWriteStatus = 'pending' | 'in_progress' | 'completed'
-
-type TodoWriteToolTodo = {
-  content: string
-  activeForm: string
-  status: TodoWriteStatus
-}
-
-type TodoWriteToolInput = {
-  todos: TodoWriteToolTodo[]
-}
-
-function normalizeTodoWriteStatus(value: unknown): TodoWriteStatus {
-  const raw = typeof value === 'string' ? value.trim() : ''
-  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_')
-  if (key === 'completed' || key === 'done') return 'completed'
-  if (key === 'in_progress' || key === 'inprogress' || key === 'running') return 'in_progress'
-  return 'pending'
-}
-
-function tryParseTodoWriteToolInput(input: string): TodoWriteToolInput | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const todosValue = args.todos
-  if (!Array.isArray(todosValue)) return null
-
-  const todos: TodoWriteToolTodo[] = []
-  for (const todoValue of todosValue) {
-    if (!todoValue || typeof todoValue !== 'object' || Array.isArray(todoValue)) continue
-    const todoObj = todoValue as Record<string, unknown>
-    const content = typeof todoObj.content === 'string' ? todoObj.content.trim() : ''
-    const activeForm = typeof todoObj.activeForm === 'string' ? todoObj.activeForm.trim() : ''
-    const status = normalizeTodoWriteStatus(todoObj.status)
-
-    const normalizedContent = content || activeForm
-    if (!normalizedContent) continue
-
-    todos.push({
-      content: normalizedContent,
-      activeForm: activeForm || normalizedContent,
-      status,
-    })
-  }
-
-  return { todos }
-}
-
-type TaskToolInput = {
-  subagentType: string
-  description: string
-  prompt: string
-}
-
-function tryParseTaskToolInput(input: string): TaskToolInput | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const subagentType =
-    readFirstNonEmptyString(args, ['subagent_type', 'subagentType', 'subagent', 'agentType']) ?? ''
-  const description = readFirstNonEmptyString(args, ['description', 'desc']) ?? ''
-  const prompt = readFirstString(args, ['prompt']) ?? ''
-
-  if (!subagentType && !description && !prompt.trim()) return null
-  return { subagentType, description, prompt }
 }
 
 function tryParseJsonValue(value: string): unknown | null {
@@ -777,78 +607,30 @@ function normalizeReadToolOutputForMonaco(output: string): string {
   return normalized
 }
 
-type AskUserQuestionToolOption = {
-  label: string
-  description: string
-  value?: string
+function extractInlineThink(text: string): { thinkText: string; visibleText: string } | null {
+  const raw = text ?? ''
+  const start = raw.indexOf('<think>')
+  if (start < 0) return null
+
+  const end = raw.indexOf('</think>', start + '<think>'.length)
+  if (end < 0 || end <= start) return null
+
+  const before = raw.slice(0, start)
+  const thinkText = raw.slice(start + '<think>'.length, end).trim()
+  const after = raw.slice(end + '</think>'.length)
+
+  if (!thinkText.trim()) return null
+
+  const beforeTrimmedEnd = before.replace(/\s+$/, '')
+  const afterTrimmedStart = after.replace(/^\s+/, '')
+  const spacer = beforeTrimmedEnd && afterTrimmedStart ? '\n\n' : ''
+  const visibleText = `${beforeTrimmedEnd}${spacer}${afterTrimmedStart}`
+
+  return { thinkText, visibleText }
 }
 
-type AskUserQuestionToolQuestion = {
-  header: string
-  question: string
-  multiSelect: boolean
-  options: AskUserQuestionToolOption[]
-}
-
-type AskUserQuestionToolInput = {
-  questions: AskUserQuestionToolQuestion[]
-  answers?: Record<string, string>
-}
-
-function tryParseAskUserQuestionToolInput(input: string): AskUserQuestionToolInput | null {
-  const obj = tryParseJsonRecord(input)
-  if (!obj) return null
-  const args = unwrapToolArgsRecord(obj)
-
-  const questionsValue = args.questions
-  if (!Array.isArray(questionsValue) || questionsValue.length === 0) return null
-
-  const questions: AskUserQuestionToolQuestion[] = []
-  for (const questionValue of questionsValue) {
-    if (!questionValue || typeof questionValue !== 'object') continue
-    const questionObj = questionValue as Record<string, unknown>
-
-    const questionText = typeof questionObj.question === 'string' ? questionObj.question.trim() : ''
-    if (!questionText) continue
-
-    const header = typeof questionObj.header === 'string' ? questionObj.header.trim() : ''
-    const multiSelect = questionObj.multiSelect === true || questionObj.multi_select === true
-
-    const optionsValue = questionObj.options
-    if (!Array.isArray(optionsValue) || optionsValue.length < 2) continue
-
-    const options: AskUserQuestionToolOption[] = []
-    for (const optionValue of optionsValue) {
-      if (!optionValue || typeof optionValue !== 'object') continue
-      const optionObj = optionValue as Record<string, unknown>
-      const label = typeof optionObj.label === 'string' ? optionObj.label.trim() : ''
-      if (!label) continue
-      const description = typeof optionObj.description === 'string' ? optionObj.description.trim() : ''
-      const value = typeof optionObj.value === 'string' ? optionObj.value.trim() : undefined
-      options.push(value ? { label, description, value } : { label, description })
-    }
-
-    if (options.length < 2) continue
-    questions.push({ header, question: questionText, multiSelect, options })
-  }
-
-  if (questions.length === 0) return null
-
-  let answers: Record<string, string> | undefined
-  const answersValue = args.answers
-  if (answersValue && typeof answersValue === 'object' && !Array.isArray(answersValue)) {
-    const next: Record<string, string> = {}
-    for (const [key, value] of Object.entries(answersValue as Record<string, unknown>)) {
-      if (typeof value === 'string') {
-        next[key] = value
-      }
-    }
-    if (Object.keys(next).length > 0) {
-      answers = next
-    }
-  }
-
-  return answers ? { questions, answers } : { questions }
+function getInlineThinkId(agentMessageId: string): string {
+  return `${agentMessageId}-inline-think`
 }
 
 type ReplacementLineDiffOp = { type: 'equal' | 'add' | 'del'; text: string }
@@ -1193,6 +975,22 @@ function mergeStreamingToolText(existing: string, incoming: string): string {
   return prev + next
 }
 
+function mergeStreamingText(existing: string, incoming: string): string {
+  const prev = existing ?? ''
+  const next = incoming ?? ''
+
+  if (!next) return prev
+  if (!prev) return next
+  if (next === prev) return prev
+
+  if (next.startsWith(prev)) return next
+  if (prev.startsWith(next)) return prev
+  if (next.includes(prev)) return next
+  if (prev.includes(next)) return prev
+
+  return prev + next
+}
+
 type CodexToolCallInfo = {
   callId?: string
   toolName: string
@@ -1294,6 +1092,98 @@ function tryExtractCodexToolCall(raw: string, method?: string): CodexToolCallInf
 
     const toolArgs = stringifyToolArgs(argsValue)
     return { callId, toolName, toolArgs }
+  }
+
+  return null
+}
+
+type CodexAgentMessageInfo = {
+  messageId?: string
+  text: string
+}
+
+function readCodexAgentText(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 4) return null
+
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    const joined = readPartsText(value)
+    return joined || null
+  }
+
+  if (typeof value !== 'object') return null
+  const obj = value as Record<string, unknown>
+
+  const direct = readFirstNonEmptyString(obj, [
+    'message',
+    'text',
+    'last_agent_message',
+    'lastAgentMessage',
+  ])
+  if (direct) return direct
+
+  const contentValue = obj.content ?? obj.parts
+  const contentText = readCodexAgentText(contentValue, depth + 1)
+  if (contentText) return contentText
+
+  const nestedCandidates = [obj.item, obj.msg, obj.message, obj.data]
+  for (const candidate of nestedCandidates) {
+    const nestedText = readCodexAgentText(candidate, depth + 1)
+    if (nestedText) return nestedText
+  }
+
+  return null
+}
+
+function tryExtractCodexAgentMessage(raw: string, method?: string): CodexAgentMessageInfo | null {
+  const combined = `${method ?? ''}\n${raw}`.toLowerCase()
+  const mightContainMessage =
+    combined.includes('agent_message') ||
+    combined.includes('agentmessage') ||
+    combined.includes('item_completed') ||
+    combined.includes('task_complete') ||
+    combined.includes('item/completed') ||
+    combined.includes('task_complete') ||
+    combined.includes('last_agent_message')
+
+  if (!mightContainMessage) return null
+
+  const parsed = tryParseJsonRecord(raw)
+  if (!parsed) return null
+
+  const paramsValue = parsed.params
+  const candidates: unknown[] = []
+  if (paramsValue && typeof paramsValue === 'object') {
+    const params = paramsValue as Record<string, unknown>
+    candidates.push(
+      params.msg,
+      params.item,
+      params.message,
+      params,
+      (params.msg && typeof params.msg === 'object' ? (params.msg as Record<string, unknown>).item : null),
+    )
+  } else {
+    candidates.push(paramsValue)
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const obj = candidate as Record<string, unknown>
+    const text = readCodexAgentText(obj, 0)
+    if (!text) continue
+
+    const messageId =
+      readFirstNonEmptyString(obj, ['messageId', 'message_id', 'id']) ??
+      (obj.item && typeof obj.item === 'object'
+        ? readFirstNonEmptyString(obj.item as Record<string, unknown>, [
+            'messageId',
+            'message_id',
+            'id',
+          ])
+        : null) ??
+      undefined
+
+    return { messageId, text }
   }
 
   return null
@@ -1481,7 +1371,7 @@ function TokenUsagePill({ usage }: { usage: TokenUsageArtifact }) {
 
 type ChatAlign = 'justify-end' | 'justify-start'
 
-type OpenById = Record<string, boolean>
+export type OpenById = Record<string, boolean>
 type SetOpenById = Dispatch<SetStateAction<OpenById>>
 
 function ChatMessageRow({ align, children }: { align: ChatAlign; children: ReactNode }) {
@@ -1571,44 +1461,8 @@ const ChatThinkMessage = memo(function ChatThinkMessage({
         ) : null}
       </div>
     </ChatMessageRow>
-  )
+  ) 
 })
-
-const askUserQuestionOtherValue = '__other__'
-
-type AskUserQuestionAnswerDraft = {
-  selectedValues: string[]
-  otherText: string
-}
-
-function getAskUserQuestionOptionValue(option: AskUserQuestionToolOption): string {
-  const value = (option.value ?? '').trim()
-  return value || option.label.trim()
-}
-
-function buildAskUserQuestionAnswerText(
-  question: AskUserQuestionToolQuestion,
-  draft: AskUserQuestionAnswerDraft | undefined,
-): string {
-  if (!draft) return ''
-  const selected = draft.selectedValues ?? []
-  const otherText = (draft.otherText ?? '').trim()
-
-  if (question.multiSelect) {
-    const explicit = selected.filter((v) => v && v !== askUserQuestionOtherValue)
-    const parts = selected.includes(askUserQuestionOtherValue)
-      ? otherText
-        ? [...explicit, otherText]
-        : explicit
-      : explicit
-    return parts.join(', ')
-  }
-
-  const first = selected[0] ?? ''
-  if (first === askUserQuestionOtherValue) return otherText
-  return first
-}
-
 
 function formatToolCallCount(count: number): string {
   const n = Math.max(0, count)
@@ -1632,14 +1486,12 @@ function computeReplacementDiffStats(oldString: string, newString: string): { ad
 
 const ChatToolCallItem = memo(function ChatToolCallItem({
   message,
-  toolType,
   openById,
   onToggle,
   onSubmitAskUserQuestion,
   askUserQuestionDisabled,
 }: {
   message: ChatMessage
-  toolType: ToolType
   openById: OpenById
   onToggle: (id: string) => void
   onSubmitAskUserQuestion?: (toolUseId: string, answers: Record<string, string>, messageId: string) => void
@@ -1669,7 +1521,7 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
     return buildReplacementDiff(inputData.editInput.filePath, inputData.editInput.oldString, inputData.editInput.newString)
   }, [inputData.editInput])
 
-  const readCode = useMemo(() => {
+  const fallbackReadCode = useMemo(() => {
     if (!inputData.readInput) return null
     if (inputData.readInput.content != null) {
       return normalizeReadToolOutputForMonaco(inputData.readInput.content)
@@ -1677,6 +1529,35 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
     const extracted = tryExtractReadToolOutput(output)
     return normalizeReadToolOutputForMonaco(extracted ?? output)
   }, [output, inputData.readInput])
+
+  const [readCodeFromApi, setReadCodeFromApi] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!inputData.readInput) {
+      setReadCodeFromApi(null)
+      return
+    }
+
+    const { filePath, offset, limit } = inputData.readInput
+    setReadCodeFromApi(null)
+
+    void (async () => {
+      try {
+        const data = await api.fs.readFile(filePath, { offset, limit })
+        if (cancelled) return
+        setReadCodeFromApi(normalizeReadToolOutputForMonaco(data.content ?? ''))
+      } catch {
+        if (!cancelled) setReadCodeFromApi(null)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [inputData.readInput?.filePath, inputData.readInput?.offset, inputData.readInput?.limit])
+
+  const readCode = readCodeFromApi ?? fallbackReadCode
 
   const title = useMemo(() => {
     if (inputData.editInput) {
@@ -1789,7 +1670,6 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
 
 const ChatToolGroupMessage = memo(function ChatToolGroupMessage({
   toolMessages,
-  toolType,
   align,
   openById,
   onToggle,
@@ -1798,7 +1678,6 @@ const ChatToolGroupMessage = memo(function ChatToolGroupMessage({
   askUserQuestionDisabled,
 }: {
   toolMessages: ChatMessage[]
-  toolType: ToolType
   align: ChatAlign
   openById: OpenById
   onToggle: (id: string) => void
@@ -1849,7 +1728,6 @@ const ChatToolGroupMessage = memo(function ChatToolGroupMessage({
               <ChatToolCallItem
                 key={tool.id}
                 message={tool}
-                toolType={toolType}
                 openById={openById}
                 onToggle={onToggle}
                 onSubmitAskUserQuestion={onSubmitAskUserQuestion}
@@ -2003,7 +1881,6 @@ const ChatMessageList = memo(function ChatMessageList({
   toolOpenById,
   setToolOpenById,
   tokenByMessageId,
-  toolType,
   onSubmitAskUserQuestion,
   askUserQuestionDisabled,
 }: {
@@ -2016,7 +1893,6 @@ const ChatMessageList = memo(function ChatMessageList({
   toolOpenById: OpenById
   setToolOpenById: SetOpenById
   tokenByMessageId: Record<string, TokenUsageArtifact>
-  toolType: ToolType
   onSubmitAskUserQuestion?: (
     toolUseId: string,
     answers: Record<string, string>,
@@ -2092,7 +1968,6 @@ const ChatMessageList = memo(function ChatMessageList({
               <ChatToolGroupMessage
                 key={`working-${toolMessages[0].id}`}
                 toolMessages={toolMessages}
-                toolType={toolType}
                 align={align}
                 openById={toolOpenById}
                 onToggle={toggleToolOpen}
@@ -2149,13 +2024,24 @@ function upsertThinkChunk(
   return next
 }
 
-function insertBeforeMessage(
+function upsertThinkMessage(
   prev: ChatMessage[],
-  anchorMessageId: string,
-  message: ChatMessage,
+  thinkMessageId: string,
+  agentMessageId: string,
+  thinkText: string,
 ): ChatMessage[] {
-  const insertIndex = prev.findIndex((m) => m.id === anchorMessageId)
+  const existingIndex = prev.findIndex((m) => m.id === thinkMessageId)
+  if (existingIndex >= 0) {
+    const existing = prev[existingIndex]
+    if (existing.text === thinkText) return prev
+    const next = [...prev]
+    next[existingIndex] = { ...existing, text: thinkText }
+    return next
+  }
+
+  const insertIndex = prev.findIndex((m) => m.id === agentMessageId)
   const next = [...prev]
+  const message: ChatMessage = { id: thinkMessageId, role: 'agent', kind: 'think', text: thinkText }
   if (insertIndex >= 0) {
     next.splice(insertIndex, 0, message)
   } else {
@@ -2164,11 +2050,62 @@ function insertBeforeMessage(
   return next
 }
 
+function extractInlineThinkForMessage(
+  messages: ChatMessage[],
+  agentMessageId: string,
+): { messages: ChatMessage[]; thinkMessageId: string } | null {
+  const targetIndex = messages.findIndex(
+    (m) => m.id === agentMessageId && m.role === 'agent' && m.kind === 'text',
+  )
+  if (targetIndex < 0) return null
+
+  const target = messages[targetIndex]
+  const inlineThink = extractInlineThink(target.text)
+  if (!inlineThink) return null
+
+  const thinkMessageId = getInlineThinkId(agentMessageId)
+  let next = upsertThinkMessage(messages, thinkMessageId, agentMessageId, inlineThink.thinkText)
+
+  const updatedIndex = next.findIndex((m) => m.id === agentMessageId)
+  if (updatedIndex >= 0) {
+    const updated = next[updatedIndex]
+    next = [...next]
+    next[updatedIndex] = { ...updated, text: inlineThink.visibleText }
+  }
+
+  return { messages: next, thinkMessageId }
+}
+
+function splitInlineThinkMessages(
+  messages: ChatMessage[],
+): { messages: ChatMessage[]; thinkIds: string[] } {
+  const next: ChatMessage[] = []
+  const thinkIds: string[] = []
+
+  for (const message of messages) {
+    if (message.role === 'agent' && message.kind === 'text') {
+      const inlineThink = extractInlineThink(message.text)
+      if (inlineThink) {
+        const thinkMessageId = getInlineThinkId(message.id)
+        next.push({ id: thinkMessageId, role: 'agent', kind: 'think', text: inlineThink.thinkText })
+        thinkIds.push(thinkMessageId)
+        next.push({ ...message, text: inlineThink.visibleText })
+        continue
+      }
+    }
+
+    next.push(message)
+  }
+
+  return { messages: next, thinkIds }
+}
+
 function insertAfterMessage(
   prev: ChatMessage[],
-  anchorMessageId: string,
+  anchorMessageId: string | null | undefined,
   message: ChatMessage,
 ): ChatMessage[] {
+  if (!anchorMessageId) return [...prev, message]
   const insertIndex = prev.findIndex((m) => m.id === anchorMessageId)
   const next = [...prev]
   if (insertIndex >= 0) {
@@ -2250,6 +2187,7 @@ export function ProjectChat({
   const [modelSelection, setModelSelection] = useState<ModelSelection | null>(null)
   const [customModels, setCustomModels] = useState<string[]>([])
   const [customModelsLoaded, setCustomModelsLoaded] = useState(false)
+  const [customModelsLoadedKey, setCustomModelsLoadedKey] = useState<string | null>(null)
   const [addModelOpen, setAddModelOpen] = useState(false)
   const [addModelProviderId, setAddModelProviderId] = useState('')
   const [addModelDraft, setAddModelDraft] = useState('')
@@ -2467,19 +2405,46 @@ export function ProjectChat({
           if (!uniqueMap.has(msg.id)) uniqueMap.set(msg.id, msg)
         }
         const deduped = Array.from(uniqueMap.values())
+        const { messages: dedupedWithThink, thinkIds: dedupedThinkIds } =
+          splitInlineThinkMessages(deduped)
 
+        let insertedThinkIds: string[] = []
         if (prepend) {
-          if (deduped.length) {
+          if (dedupedWithThink.length) {
             suppressAutoScrollRef.current = true
             setMessages((prev) => {
-              if (!prev.length) return deduped
+              if (!prev.length) {
+                insertedThinkIds = dedupedThinkIds
+                return dedupedWithThink
+              }
               const existing = new Set(prev.map((m) => m.id))
-              const unique = deduped.filter((m) => !existing.has(m.id))
+              const unique = dedupedWithThink.filter((m) => !existing.has(m.id))
+              if (unique.length) {
+                const newThinkIds = dedupedThinkIds.filter((id) =>
+                  unique.some((m) => m.id === id),
+                )
+                if (newThinkIds.length) insertedThinkIds = newThinkIds
+              }
               return unique.length ? [...unique, ...prev] : prev
             })
           }
         } else {
-          setMessages(deduped)
+          setMessages(dedupedWithThink)
+          insertedThinkIds = dedupedThinkIds
+        }
+
+        if (insertedThinkIds.length) {
+          setThinkOpenById((prev) => {
+            const next = { ...prev }
+            let changed = false
+            for (const id of insertedThinkIds) {
+              if (next[id] === undefined) {
+                next[id] = true
+                changed = true
+              }
+            }
+            return changed ? next : prev
+          })
         }
 
         setHistoryCursor(page.nextCursor ?? null)
@@ -2501,7 +2466,7 @@ export function ProjectChat({
         setHistoryLoading(false)
       }
     },
-    [mapSessionMessage, project.id, sessionId],
+    [mapSessionMessage, project.id, sessionId, setThinkOpenById],
   )
 
   const handleScroll = useCallback(() => {
@@ -2709,6 +2674,7 @@ export function ProjectChat({
   useEffect(() => {
     setCustomModels([])
     setCustomModelsLoaded(false)
+    setCustomModelsLoadedKey(null)
 
     try {
       if (typeof window === 'undefined') return
@@ -2729,11 +2695,14 @@ export function ProjectChat({
       // ignore
     } finally {
       setCustomModelsLoaded(true)
+      setCustomModelsLoadedKey(customModelStorageKey)
     }
   }, [customModelStorageKey])
 
   useEffect(() => {
-    const optionsLoaded = providersLoaded && customModelsLoaded
+    const customModelsReady =
+      customModelsLoaded && customModelsLoadedKey === customModelStorageKey
+    const optionsLoaded = providersLoaded && customModelsReady
     if (!optionsLoaded) return
 
     if (!modelSelection) return
@@ -2757,7 +2726,15 @@ export function ProjectChat({
     if (normalized !== modelSelection.model) {
       setModelSelection({ ...modelSelection, model: normalized })
     }
-  }, [customModels, customModelsLoaded, modelSelection, providers, providersLoaded])
+  }, [
+    customModelStorageKey,
+    customModels,
+    customModelsLoaded,
+    customModelsLoadedKey,
+    modelSelection,
+    providers,
+    providersLoaded,
+  ])
 
   useEffect(() => {
     if (!mentionMode) return
@@ -2800,11 +2777,27 @@ export function ProjectChat({
     }
   }, [mentionMode, workspacePath])
 
-  const updateMessageText = useCallback((messageId: string, updater: (prev: string) => string) => {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === messageId ? { ...m, text: updater(m.text) } : m)),
-    )
-  }, [])
+  const updateMessageText = useCallback(
+    (messageId: string, updater: (prev: string) => string) => {
+      let newThinkId: string | null = null
+      setMessages((prev) => {
+        const next = prev.map((m) => (m.id === messageId ? { ...m, text: updater(m.text) } : m))
+        const extraction = extractInlineThinkForMessage(next, messageId)
+        if (!extraction) return next
+
+        newThinkId = extraction.thinkMessageId
+        return extraction.messages
+      })
+
+      if (newThinkId) {
+        const thinkId = newThinkId
+        setThinkOpenById((prev) =>
+          prev[thinkId] !== undefined ? prev : { ...prev, [thinkId]: true },
+        )
+      }
+    },
+    [setThinkOpenById],
+  )
 
   const persistCustomModels = useCallback(
     (models: string[]) => {
@@ -3140,6 +3133,7 @@ export function ProjectChat({
     let thinkSegmentIndex = 0
     let activeThinkMessageId: string | null = null
     const seenToolCalls = new Set<string>()
+    const seenCodexAgentMessages = new Set<string>()
     const toolMessageIdByUseId = new Map<string, string>()
     const toolNameByUseId = new Map<string, string>()
     const seenClaudeToolResultChunks = new Set<string>()
@@ -3335,10 +3329,44 @@ export function ProjectChat({
                 }
               }
             } else {
-              if (statusUpdate.final) {
-                updateMessageText(agentMessageId, () => chunk)
+              if (startNewTextSegmentAfterTools && toolChainTailMessageId) {
+                agentTextSegmentIndex += 1
+                const nextTextId = `${agentMessageId}-seg-${agentTextSegmentIndex}`
+                const insertAfterId = toolChainTailMessageId
+
+                activeAgentTextMessageId = nextTextId
+                sawAnyAgentText = true
+                startNewTextSegmentAfterTools = false
+                toolChainTailMessageId = null
+
+                const toolMessage: ChatMessage = {
+                  id: nextTextId,
+                  role: 'agent',
+                  kind: 'text',
+                  text: chunk,
+                }
+
+                setMessages((prev) => {
+                  const existingIndex = prev.findIndex((m) => m.id === nextTextId)
+                  if (existingIndex >= 0) {
+                    const next = [...prev]
+                    const existing = next[existingIndex]
+                    next[existingIndex] = { ...existing, text: existing.text + chunk }
+                    return next
+                  }
+
+                  return insertAfterMessage(prev, insertAfterId, toolMessage)
+                })
               } else {
-                updateMessageText(agentMessageId, (prev) => prev + chunk)
+                if (statusUpdate.final) {
+                  updateMessageText(activeAgentTextMessageId, () => chunk)
+                } else {
+                  updateMessageText(activeAgentTextMessageId, (prev) => prev + chunk)
+                }
+                sawAnyAgentText = true
+                if (toolChainTailMessageId) {
+                  toolChainTailMessageId = null
+                }
               }
             }
           }
@@ -3400,35 +3428,6 @@ export function ProjectChat({
                 : { ...prev, [toolOutputMessageId]: true },
             )
 
-            setMessages((prev) => {
-              const existingIndex = prev.findIndex((m) => m.id === toolOutputMessageId)
-              if (existingIndex >= 0) {
-                const next = [...prev]
-                const existing = next[existingIndex]
-                next[existingIndex] = {
-                  ...existing,
-                  kind: 'tool',
-                  role: 'agent',
-                  toolName: existing.toolName ?? 'Tool Output',
-                  toolInput: existing.toolInput ?? '',
-                  toolOutput: (existing.toolOutput ?? '') + chunk,
-                  text: existing.text + chunk,
-                }
-                return next
-              }
-
-              const toolMessage: ChatMessage = {
-                id: toolOutputMessageId,
-                role: 'agent',
-                kind: 'tool',
-                toolName: 'Tool Output',
-                toolInput: '',
-                toolOutput: chunk,
-                text: chunk,
-              }
-
-              return insertBeforeMessage(prev, agentMessageId, toolMessage)
-            })
           }
           continue
         }
@@ -3677,55 +3676,116 @@ export function ProjectChat({
             const raw = typeof dataObj.raw === 'string' ? dataObj.raw : ''
             if (!raw) continue
             setRawEvents((prev) => [...prev, { receivedAtUtc, method, raw }])
-
             if (isClaude) continue
 
             const toolCall = tryExtractCodexToolCall(raw, method)
-            if (!toolCall) continue
+            if (toolCall) {
+              const dedupeKey = toolCall.callId
+                ? `call:${toolCall.callId}`
+                : `name:${toolCall.toolName}\nargs:${toolCall.toolArgs.slice(0, 256)}`
+              if (seenToolCalls.has(dedupeKey)) continue
+              seenToolCalls.add(dedupeKey)
 
-            const dedupeKey = toolCall.callId
-              ? `call:${toolCall.callId}`
-              : `name:${toolCall.toolName}\nargs:${toolCall.toolArgs.slice(0, 256)}`
-            if (seenToolCalls.has(dedupeKey)) continue
-            seenToolCalls.add(dedupeKey)
+              const toolMessageId = toolCall.callId
+                ? `msg-tool-${taskId}-${toolCall.callId}`
+                : randomId(`msg-tool-${taskId}`)
 
-            const toolMessageId = toolCall.callId
-              ? `msg-tool-${taskId}-${toolCall.callId}`
-              : randomId(`msg-tool-${taskId}`)
+              const toolMessage: ChatMessage = {
+                id: toolMessageId,
+                role: 'agent',
+                kind: 'tool',
+                toolName: toolCall.toolName,
+                toolUseId: toolCall.callId,
+                toolInput: toolCall.toolArgs,
+                text: toolCall.toolArgs,
+              }
 
-            const toolMessage: ChatMessage = {
-              id: toolMessageId,
-              role: 'agent',
-              kind: 'tool',
-              toolName: toolCall.toolName,
-              toolUseId: toolCall.callId,
-              toolInput: toolCall.toolArgs,
-              text: toolCall.toolArgs,
+              const shouldOpenTool = isAskUserQuestionToolName(toolCall.toolName)
+              setToolOpenById((prev) =>
+                prev[toolMessageId] !== undefined
+                  ? prev
+                  : { ...prev, [toolMessageId]: shouldOpenTool },
+              )
+
+              const chainTailId: string | null = toolChainTailMessageId
+              const textAnchorId = activeAgentTextMessageId
+              if (!chainTailId) {
+                startNewTextSegmentAfterTools = true
+              }
+              toolChainTailMessageId = toolMessageId
+
+              setMessages((prev) => {
+                const tailIndex = chainTailId ? prev.findIndex((m) => m.id === chainTailId) : -1
+                const anchorAfterId =
+                  tailIndex >= 0
+                    ? (chainTailId as string)
+                    : findLastConsecutiveToolIdAfter(prev, textAnchorId) ?? textAnchorId
+                return insertAfterMessage(prev, anchorAfterId, toolMessage)
+              })
+
+              // Split reasoning around tool boundaries so the timeline reads:
+              // 思考 -> Tool -> 思考 -> Text
+              activeThinkMessageId = null
+              setActiveReasoningMessageId(null)
             }
 
-            const shouldOpenTool = isAskUserQuestionToolName(toolCall.toolName)
-            setToolOpenById((prev) =>
-              prev[toolMessageId] !== undefined
-                ? prev
-                : { ...prev, [toolMessageId]: shouldOpenTool },
-            )
+            const agentMessage = tryExtractCodexAgentMessage(raw, method)
+            if (!agentMessage?.text) continue
 
-            setMessages((prev) => insertBeforeMessage(prev, agentMessageId, toolMessage))
-            toolChainTailMessageId = toolMessageId
+            const normalized = normalizeNewlines(agentMessage.text)
+            const trimmed = normalized.trim()
+            if (!trimmed) continue
 
-            // Split reasoning around tool boundaries so the timeline reads:
-            // 思考 -> Tool -> 思考 -> Text
-            activeThinkMessageId = null
-            setActiveReasoningMessageId(null)
+            const agentDedupeKey = agentMessage.messageId
+              ? `msg:${agentMessage.messageId}`
+              : `text:${hashString(trimmed)}`
+            if (seenCodexAgentMessages.has(agentDedupeKey)) continue
+            seenCodexAgentMessages.add(agentDedupeKey)
+
+            if (startNewTextSegmentAfterTools && toolChainTailMessageId) {
+              agentTextSegmentIndex += 1
+              const nextTextId = `${agentMessageId}-seg-${agentTextSegmentIndex}`
+              const insertAfterId = toolChainTailMessageId
+
+              activeAgentTextMessageId = nextTextId
+              sawAnyAgentText = true
+              startNewTextSegmentAfterTools = false
+              toolChainTailMessageId = null
+
+              const toolMessage: ChatMessage = {
+                id: nextTextId,
+                role: 'agent',
+                kind: 'text',
+                text: trimmed,
+              }
+
+              setMessages((prev) => {
+                const existingIndex = prev.findIndex((m) => m.id === nextTextId)
+                if (existingIndex >= 0) {
+                  const next = [...prev]
+                  const existing = next[existingIndex]
+                  next[existingIndex] = { ...existing, text: mergeStreamingText(existing.text, trimmed) }
+                  return next
+                }
+
+                return insertAfterMessage(prev, insertAfterId, toolMessage)
+              })
+            } else {
+              updateMessageText(activeAgentTextMessageId, (prev) => mergeStreamingText(prev, trimmed))
+              sawAnyAgentText = true
+              if (toolChainTailMessageId) {
+                toolChainTailMessageId = null
+              }
+            }
           }
         }
-      }
 
-      if (!sawFinal) {
-        setSending(false)
-        setActiveReasoningMessageId(null)
-        setActiveTaskId(null)
-        setCanceling(false)
+        if (!sawFinal) {
+          setSending(false)
+          setActiveReasoningMessageId(null)
+          setActiveTaskId(null)
+          setCanceling(false)
+        }
       }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
@@ -3905,9 +3965,8 @@ export function ProjectChat({
               toolOpenById={toolOpenById}
               setToolOpenById={setToolOpenById}
               tokenByMessageId={tokenByMessageId}
-              toolType={project.toolType}
               onSubmitAskUserQuestion={submitAskUserQuestion}
-              askUserQuestionDisabled={!sending || !activeTaskId || canceling}
+              askUserQuestionDisabled={sending || !activeTaskId || canceling}
             />
           </div>
 
@@ -4697,45 +4756,6 @@ export function ProjectChat({
                     >
                       清空事件
                     </Button>
-                  </div>
-                </div>
-
-                <div className="mt-3 space-y-4">
-                  <div>
-                    <div className="text-xs font-medium text-muted-foreground">
-                      Tool Output
-                    </div>
-                    {toolOutput ? (
-                      <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 text-[11px]">
-                        {toolOutput}
-                      </pre>
-                    ) : (
-                      <div className="mt-2 text-xs text-muted-foreground">（无）</div>
-                    )}
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-medium text-muted-foreground">
-                      Raw Events
-                    </div>
-                    <div className="mt-2 space-y-2">
-                      {rawEvents.length ? null : (
-                        <div className="text-xs text-muted-foreground">（无）</div>
-                      )}
-                      {rawEvents.map((e, idx) => (
-                        <div
-                          key={`${e.receivedAtUtc}-${idx}`}
-                          className="rounded-md border bg-background p-2"
-                        >
-                          <div className="truncate text-[11px] text-muted-foreground">
-                            {e.receivedAtUtc} {e.method ?? ''}
-                          </div>
-                          <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap text-[11px]">
-                            {e.raw}
-                          </pre>
-                        </div>
-                      ))}
-                    </div>
                   </div>
                 </div>
               </div>

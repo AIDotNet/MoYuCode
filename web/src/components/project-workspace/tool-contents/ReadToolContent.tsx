@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/animate-ui/primitives/animate/tooltip'
+import { Tooltip, TooltipContent } from '@/components/animate-ui/primitives/animate/tooltip'
 import { MonacoCode } from '@/components/MonacoCode'
 import type { ReadToolInput } from '@/lib/toolInputParsers'
 
@@ -13,11 +13,6 @@ export const ReadToolContent = memo(function ReadToolContent({ input, code }: Re
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Tooltip side="top" sideOffset={8}>
-          <TooltipTrigger asChild>
-            <div className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground cursor-pointer hover:text-foreground">
-              {input.filePath}
-            </div>
-          </TooltipTrigger>
           <TooltipContent className="max-w-xs break-all">{input.filePath}</TooltipContent>
         </Tooltip>
       </div>

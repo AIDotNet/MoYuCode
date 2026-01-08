@@ -5,7 +5,7 @@ import {
 } from 'vscode-icons-ts'
 
 const iconUrlByPath = import.meta.glob(
-  '/node_modules/vscode-icons-ts/build/icons/*.svg',
+  '../node_modules/vscode-icons-ts/build/icons/*.svg',
   {
     eager: true,
     query: '?url',
@@ -13,7 +13,7 @@ const iconUrlByPath = import.meta.glob(
   },
 ) as Record<string, string>
 
-const ICON_DIR = '/node_modules/vscode-icons-ts/build/icons/'
+const ICON_DIR = '../node_modules/vscode-icons-ts/build/icons/'
 
 export function resolveVscodeIconUrl(iconFile: string | null | undefined): string | null {
   const normalized = (iconFile ?? '').trim()

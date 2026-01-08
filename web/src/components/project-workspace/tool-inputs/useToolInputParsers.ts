@@ -9,14 +9,18 @@ import {
   tryParseWriteToolInput,
   tryParseReadToolInput,
   tryParseEditToolInput,
+  tryParseBashToolInput,
+  tryParseGlobToolInput,
   isTaskToolName,
   isTodoWriteToolName,
   isAskUserQuestionToolName,
   isWriteToolName,
   isReadToolName,
   isEditToolName,
+  isBashToolName,
+  isGlobToolName,
 } from '@/lib/toolInputParsers'
-import type { WriteToolInput, ReadToolInput, EditToolInput } from '@/lib/toolInputParsers'
+import type { WriteToolInput, ReadToolInput, EditToolInput, BashToolInput, GlobToolInput } from '@/lib/toolInputParsers'
 
 export type ToolInputData = {
   taskInput: TaskToolInput | null
@@ -25,6 +29,8 @@ export type ToolInputData = {
   readInput: ReadToolInput | null
   editInput: EditToolInput | null
   todoWriteInput: TodoWriteToolInput | null
+  bashInput: BashToolInput | null
+  globInput: GlobToolInput | null
 }
 
 export function useToolInputParsers(toolName: string, input: string): ToolInputData {
@@ -36,6 +42,8 @@ export function useToolInputParsers(toolName: string, input: string): ToolInputD
       readInput: null,
       editInput: null,
       todoWriteInput: null,
+      bashInput: null,
+      globInput: null,
     }
 
     if (isTaskToolName(toolName)) {
@@ -55,6 +63,12 @@ export function useToolInputParsers(toolName: string, input: string): ToolInputD
     }
     if (isTodoWriteToolName(toolName)) {
       return { ...base, todoWriteInput: tryParseTodoWriteToolInput(input) }
+    }
+    if (isBashToolName(toolName)) {
+      return { ...base, bashInput: tryParseBashToolInput(input) }
+    }
+    if (isGlobToolName(toolName)) {
+      return { ...base, globInput: tryParseGlobToolInput(input) }
     }
 
     return base

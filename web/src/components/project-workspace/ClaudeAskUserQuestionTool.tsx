@@ -2,8 +2,15 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { cn } from '@/lib/utils'
-import { Check } from 'lucide-react'
 import type { AskUserQuestionToolInput, AskUserQuestionToolQuestion, AskUserQuestionToolOption } from '@/components/project-workspace/tool-inputs/askType'
 
 const askUserQuestionOtherValue = '__other__'
@@ -59,9 +66,11 @@ export const ClaudeAskUserQuestionTool = memo(function ClaudeAskUserQuestionTool
 
   const [draftByQuestion, setDraftByQuestion] = useState<Record<string, AskUserQuestionAnswerDraft>>({})
   const [submitted, setSubmitted] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   useEffect(() => {
     setSubmitted(false)
+    setConfirmOpen(false)
     setDraftByQuestion((prev) => {
       const next: Record<string, AskUserQuestionAnswerDraft> = {}
       for (const q of input.questions) {
@@ -126,7 +135,13 @@ export const ClaudeAskUserQuestionTool = memo(function ClaudeAskUserQuestionTool
     }
     setSubmitted(true)
     onSubmit(answers)
+    setConfirmOpen(false)
   }, [draftByQuestion, input.questions, onSubmit])
+
+  const requestSubmit = useCallback(() => {
+    if (disabled || submitted || !allAnswered) return
+    setConfirmOpen(true)
+  }, [allAnswered, disabled, submitted])
 
   return (
     <div className="space-y-3">
@@ -139,6 +154,7 @@ export const ClaudeAskUserQuestionTool = memo(function ClaudeAskUserQuestionTool
           ...o,
           resolvedValue: getAskUserQuestionOptionValue(o),
         }))
+        const optionInputType = q.multiSelect ? 'checkbox' : 'radio'
         const effectiveDisabled = disabled || submitted
 
         return (
@@ -162,73 +178,103 @@ export const ClaudeAskUserQuestionTool = memo(function ClaudeAskUserQuestionTool
               {options.map((o) => {
                 const isSelected = selectedValues.includes(o.resolvedValue)
                 return (
-                  <Button
+                  <label
                     key={o.resolvedValue}
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={effectiveDisabled}
-                    onClick={() => setSelectedValues(q, o.resolvedValue)}
                     className={cn(
-                      'h-auto w-full items-start justify-start gap-2 px-2 py-2 text-left',
-                      isSelected ? 'bg-accent text-foreground hover:bg-accent' : 'hover:bg-accent/50',
+                      'flex cursor-pointer items-start gap-3 rounded-md border px-3 py-2 transition-colors',
+                      isSelected ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/50',
+                      effectiveDisabled && 'cursor-not-allowed opacity-60',
                     )}
                   >
-                    <span className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
-                      {isSelected ? <Check className="size-4" /> : null}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm">{o.label}</span>
+                    <input
+                      type={optionInputType}
+                      name={q.question}
+                      value={o.resolvedValue}
+                      disabled={effectiveDisabled}
+                      checked={isSelected}
+                      onChange={() => setSelectedValues(q, o.resolvedValue)}
+                      className="mt-1"
+                    />
+                    <span className="min-w-0 flex-1 space-y-0.5">
+                      <span className="block text-sm font-medium text-foreground">{o.label}</span>
                       {o.description ? (
                         <span className="mt-0.5 block text-[11px] text-muted-foreground">
                           {o.description}
                         </span>
                       ) : null}
                     </span>
-                  </Button>
+                  </label>
                 )
               })}
 
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={effectiveDisabled}
-                onClick={() => setSelectedValues(q, askUserQuestionOtherValue)}
+              <label
                 className={cn(
-                  'h-auto w-full items-start justify-start gap-2 px-2 py-2 text-left',
-                  otherSelected ? 'bg-accent text-foreground hover:bg-accent' : 'hover:bg-accent/50',
+                  'flex cursor-pointer items-start gap-3 rounded-md border px-3 py-2 transition-colors',
+                  otherSelected ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/50',
+                  effectiveDisabled && 'cursor-not-allowed opacity-60',
                 )}
               >
-                <span className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
-                  {otherSelected ? <Check className="size-4" /> : null}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm">Other</span>
-                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                    {q.multiSelect ? 'Type something (optional).' : 'Type something.'}
-                  </span>
-                </span>
-              </Button>
-
-              {otherSelected ? (
-                <Input
-                  value={draft?.otherText ?? ''}
+                <input
+                  type={optionInputType}
+                  name={q.question}
+                  value={askUserQuestionOtherValue}
                   disabled={effectiveDisabled}
-                  placeholder={q.multiSelect ? 'Type something…' : 'Type something…'}
-                  onChange={(e) => setOtherText(q.question, e.target.value)}
+                  checked={otherSelected}
+                  onChange={() => setSelectedValues(q, askUserQuestionOtherValue)}
+                  className="mt-1"
                 />
-              ) : null}
+                <span className="min-w-0 flex-1 space-y-1">
+                  <span className="block text-sm font-medium text-foreground">Other</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    {q.multiSelect ? 'Optional: add a custom choice.' : 'Enter a custom choice.'}
+                  </span>
+                  <Input
+                    value={draft?.otherText ?? ''}
+                    disabled={effectiveDisabled}
+                    placeholder="Enter a custom value"
+                    onFocus={() => {
+                      if (!otherSelected) {
+                        setSelectedValues(q, askUserQuestionOtherValue)
+                      }
+                    }}
+                    onChange={(e) => {
+                      if (!otherSelected) {
+                        setSelectedValues(q, askUserQuestionOtherValue)
+                      }
+                      setOtherText(q.question, e.target.value)
+                    }}
+                  />
+                </span>
+              </label>
             </div>
           </div>
         )
       })}
 
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button type="button" size="sm" disabled={disabled || submitted || !allAnswered} onClick={submit}>
+        <Button type="button" size="sm" disabled={disabled || submitted || !allAnswered} onClick={requestSubmit}>
           Submit
         </Button>
       </div>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Submit answers?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Answers are sent via A2A and cannot be intercepted or cancelled once submitted. Confirm before sending.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={submit} disabled={disabled || submitted || !allAnswered}>
+              Confirm submit
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 })

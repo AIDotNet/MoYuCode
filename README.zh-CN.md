@@ -213,3 +213,5 @@ OneCode 采用双栈架构：
 
 - 灵感来源于 [ZCode](https://zcode.dev/)
 - 基于 [OpenAI Codex](https://github.com/openai/codex) 和 [Anthropic Claude Code](https://claude.ai/code) 构建
+
+社区微信：wk28u9123456789

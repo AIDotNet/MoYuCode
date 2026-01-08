@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -30,10 +31,12 @@ public sealed class CodexAppServerClient : IAsyncDisposable
     private CancellationTokenSource? _shutdownCts;
     private Task? _stdoutLoop;
     private Task? _stderrLoop;
+    private volatile bool _initialized;
 
     private int _nextRequestId;
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pending = new();
     private readonly ConcurrentDictionary<Guid, Channel<CodexAppServerEvent>> _subscribers = new();
+    private readonly ConcurrentDictionary<Guid, string> _providerKeyFingerprints = new();
 
     public CodexAppServerClient(
         ILogger<CodexAppServerClient> logger,
@@ -47,7 +50,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
     public async Task EnsureStartedAsync(CancellationToken cancellationToken)
     {
-        if (IsProcessHealthy())
+        if (IsProcessReady())
         {
             return;
         }
@@ -55,13 +58,73 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         await _startLock.WaitAsync(cancellationToken);
         try
         {
-            if (IsProcessHealthy())
+            if (IsProcessReady())
             {
                 return;
             }
 
-            await StartProcessAsync(cancellationToken);
-            await InitializeAsync(cancellationToken);
+            if (!IsProcessHealthy())
+            {
+                await StartProcessAsync(cancellationToken);
+            }
+
+            if (!_initialized)
+            {
+                await InitializeAsync(cancellationToken);
+                _initialized = true;
+            }
+        }
+        finally
+        {
+            _startLock.Release();
+        }
+    }
+
+    public async Task EnsureProviderKeyAsync(Guid providerId, string apiKey, CancellationToken cancellationToken)
+    {
+        var normalizedKey = apiKey.Trim();
+        if (providerId == Guid.Empty || normalizedKey.Length == 0)
+        {
+            return;
+        }
+
+        var fingerprint = ComputeKeyFingerprint(normalizedKey);
+        if (_providerKeyFingerprints.TryGetValue(providerId, out var existing)
+            && string.Equals(existing, fingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!IsProcessReady())
+        {
+            await EnsureStartedAsync(cancellationToken);
+        }
+
+        if (_providerKeyFingerprints.TryGetValue(providerId, out existing)
+            && string.Equals(existing, fingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        await _startLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_providerKeyFingerprints.TryGetValue(providerId, out existing)
+                && string.Equals(existing, fingerprint, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (!IsProcessHealthy())
+            {
+                await StartProcessAsync(cancellationToken);
+                await InitializeAsync(cancellationToken);
+                _initialized = true;
+                return;
+            }
+
+            _logger.LogInformation("Restarting codex app-server to refresh provider API keys.");
+            await RestartProcessAsync(cancellationToken);
         }
         finally
         {
@@ -110,6 +173,9 @@ public sealed class CodexAppServerClient : IAsyncDisposable
     private bool IsProcessHealthy()
         => _process is not null && !_process.HasExited && _stdin is not null;
 
+    private bool IsProcessReady()
+        => IsProcessHealthy() && _initialized;
+
     private async Task StartProcessAsync(CancellationToken cancellationToken)
     {
         await DisposeProcessAsync();
@@ -144,6 +210,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
         _process = process;
         _stdin = process.StandardInput;
+        _initialized = false;
         // codex app-server expects LF-delimited JSON on stdin, even on Windows.
         // Using the default CRLF from StreamWriter.WriteLine can cause parse failures.
         _stdin.NewLine = "\n";
@@ -158,6 +225,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
             _logger.LogWarning("codex app-server exited with code {ExitCode}.", exitCode);
             FailAllPending(new IOException($"codex app-server exited with code {exitCode}."));
             Publish(new CodexAppServerEvent.StderrLine(DateTimeOffset.UtcNow, $"[codex-exited] code={exitCode}"));
+            _initialized = false;
         };
     }
 
@@ -255,6 +323,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
     {
         try
         {
+            var fingerprints = new Dictionary<Guid, string>();
             foreach (var provider in _store.Providers)
             {
                 if (provider.RequestType == ProviderRequestType.Anthropic)
@@ -270,6 +339,13 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
                 var envName = $"ONECODE_API_KEY_{provider.Id:N}";
                 startInfo.Environment[envName] = key;
+                fingerprints[provider.Id] = ComputeKeyFingerprint(key);
+            }
+
+            _providerKeyFingerprints.Clear();
+            foreach (var (providerId, fingerprint) in fingerprints)
+            {
+                _providerKeyFingerprints[providerId] = fingerprint;
             }
         }
         catch (Exception ex)
@@ -405,7 +481,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
     private async Task InitializeAsync(CancellationToken cancellationToken)
     {
-        _ = await CallAsync(
+        var response = await SendRequestAsync(
             method: "initialize",
             @params: new
             {
@@ -416,6 +492,16 @@ public sealed class CodexAppServerClient : IAsyncDisposable
                 },
             },
             cancellationToken);
+
+        if (response.TryGetProperty("error", out var error) && error.ValueKind != JsonValueKind.Null)
+        {
+            throw new InvalidOperationException($"codex app-server error: {error}");
+        }
+
+        if (!response.TryGetProperty("result", out _))
+        {
+            throw new InvalidOperationException("codex app-server response missing `result`.");
+        }
     }
 
     private async Task<JsonElement> SendRequestAsync(string method, object? @params, CancellationToken cancellationToken)
@@ -616,11 +702,27 @@ public sealed class CodexAppServerClient : IAsyncDisposable
             _process = null;
         }
 
+        _initialized = false;
         _stdin = null;
         _stdoutLoop = null;
         _stderrLoop = null;
+        _providerKeyFingerprints.Clear();
 
         FailAllPending(new IOException("codex app-server process disposed."));
+    }
+
+    private async Task RestartProcessAsync(CancellationToken cancellationToken)
+    {
+        await DisposeProcessAsync();
+        await StartProcessAsync(cancellationToken);
+        await InitializeAsync(cancellationToken);
+        _initialized = true;
+    }
+
+    private static string ComputeKeyFingerprint(string apiKey)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(apiKey));
+        return Convert.ToHexString(bytes);
     }
 
     public async ValueTask DisposeAsync()

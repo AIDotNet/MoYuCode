@@ -83,6 +83,10 @@ export type ProviderUpsertRequest = {
   azureApiVersion: string | null
 }
 
+export type ProviderModelUpdateRequest = {
+  model: string
+}
+
 export type ProjectDto = {
   id: string
   toolType: ToolType
