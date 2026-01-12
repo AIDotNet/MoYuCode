@@ -1685,7 +1685,6 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
   }, [output, inputData.readInput])
 
   const [readCodeFromApi, setReadCodeFromApi] = useState<string | null>(null)
-  const [planContent, setPlanContent] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -1711,30 +1710,6 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
       cancelled = true
     }
   }, [inputData.readInput?.filePath, inputData.readInput?.offset, inputData.readInput?.limit])
-
-  useEffect(() => {
-    let cancelled = false
-    const filePath = inputData.exitPlanModeInput?.filePath
-    if (!filePath) {
-      setPlanContent(null)
-      return
-    }
-
-    setPlanContent(null)
-    void (async () => {
-      try {
-        const data = await api.fs.readFile(filePath)
-        if (cancelled) return
-        setPlanContent(typeof data.content === 'string' ? data.content : null)
-      } catch {
-        if (!cancelled) setPlanContent(null)
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [inputData.exitPlanModeInput?.filePath])
 
   const readCode = readCodeFromApi ?? fallbackReadCode
 
@@ -1849,7 +1824,6 @@ const ChatToolCallItem = memo(function ChatToolCallItem({
             isError={isError}
             readCode={readCode}
             editDiff={editDiff}
-            planContent={planContent}
             message={message}
             askUserQuestionDisabled={askUserQuestionDisabled}
             onSubmitAskUserQuestion={onSubmitAskUserQuestion}
