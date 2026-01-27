@@ -2,6 +2,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -18,7 +19,12 @@ if (args.Length == 0 || args.Contains("-h") || args.Contains("--help"))
 
 var url = args[0];
 var outputDir = GetArgValue(args, "-o", "--output") ?? ".";
-var fps = double.Parse(GetArgValue(args, "--fps") ?? "1.0");
+var fpsStr = GetArgValue(args, "--fps") ?? "1.0";
+if (!double.TryParse(fpsStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var fps))
+{
+    Console.WriteLine($"[ERROR] Invalid fps value: {fpsStr}");
+    Environment.Exit(1);
+}
 var videoOnly = args.Contains("--video-only");
 var framesOnly = args.Contains("--frames-only");
 
@@ -125,7 +131,7 @@ async Task<bool> DownloadBilibiliVideoAsync(string url, string outputPath)
         var videoUrl = durl.GetProperty("url").GetString();
         var size = durl.GetProperty("size").GetInt64();
 
-        Console.WriteLine($"[INFO] Video size: {size / 1024 / 1024:F1} MB");
+        Console.WriteLine($"[INFO] Video size: {size / 1024.0 / 1024.0:F1} MB");
 
         // Step 3: Download video
         Console.WriteLine("[INFO] Downloading video file...");
@@ -137,30 +143,47 @@ async Task<bool> DownloadBilibiliVideoAsync(string url, string outputPath)
         response.EnsureSuccessStatusCode();
 
         var totalBytes = response.Content.Headers.ContentLength ?? size;
+        if (totalBytes <= 0) totalBytes = size > 0 ? size : 1; // Prevent division by zero
 
         await using var contentStream = await response.Content.ReadAsStreamAsync();
-        await using var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+        await using var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
 
-        var buffer = new byte[8192];
+        var buffer = new byte[81920]; // Larger buffer for better performance
         var totalRead = 0L;
-        var lastProgress = 0;
+        var lastProgress = -1;
         int bytesRead;
 
-        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
         {
-            await fileStream.WriteAsync(buffer, 0, bytesRead);
+            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
             totalRead += bytesRead;
 
             var progress = (int)(totalRead * 100 / totalBytes);
-            if (progress > lastProgress && progress % 10 == 0)
+            if (progress != lastProgress && (progress % 10 == 0 || progress == 100))
             {
                 Console.WriteLine($"[INFO] Progress: {progress}%");
                 lastProgress = progress;
             }
         }
 
+        // Ensure 100% is shown
+        if (lastProgress != 100)
+        {
+            Console.WriteLine($"[INFO] Progress: 100%");
+        }
+
         Console.WriteLine($"[OK] Video downloaded: {outputPath}");
         return true;
+    }
+    catch (HttpRequestException ex)
+    {
+        Console.WriteLine($"[ERROR] Network error: {ex.Message}");
+        return false;
+    }
+    catch (JsonException ex)
+    {
+        Console.WriteLine($"[ERROR] Failed to parse API response: {ex.Message}");
+        return false;
     }
     catch (Exception ex)
     {
@@ -173,23 +196,12 @@ string? ExtractBvid(string url)
 {
     // Match BV ID from various URL formats
     // https://www.bilibili.com/video/BV1xx411c7mD
+    // https://www.bilibili.com/video/BV1xx411c7mD?p=1
     // https://b23.tv/BV1xx411c7mD
     // BV1xx411c7mD
-    var patterns = new[]
-    {
-        @"BV[a-zA-Z0-9]+",
-    };
-
-    foreach (var pattern in patterns)
-    {
-        var match = Regex.Match(url, pattern);
-        if (match.Success)
-        {
-            return match.Value;
-        }
-    }
-
-    return null;
+    // BV ID is exactly 12 characters: BV + 10 alphanumeric chars
+    var match = Regex.Match(url, @"BV[a-zA-Z0-9]{10}");
+    return match.Success ? match.Value : null;
 }
 
 HttpClient CreateHttpClient()
@@ -227,12 +239,12 @@ async Task<bool> ExtractFramesAsync(string videoPath, string outputDir, double f
 
     try
     {
-        Console.WriteLine($"[INFO] Running ffmpeg...");
+        Console.WriteLine($"[INFO] Running ffmpeg: {ffmpeg}");
 
         var psi = new ProcessStartInfo
         {
             FileName = ffmpeg,
-            Arguments = $"-i \"{videoPath}\" -vf \"fps={fps}\" -q:v 2 -y \"{outputPattern}\"",
+            Arguments = $"-i \"{videoPath}\" -vf \"fps={fps.ToString(CultureInfo.InvariantCulture)}\" -q:v 2 -y \"{outputPattern}\"",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -246,16 +258,32 @@ async Task<bool> ExtractFramesAsync(string videoPath, string outputDir, double f
             return false;
         }
 
-        var stderr = await process.StandardError.ReadToEndAsync();
+        // Read stderr asynchronously to prevent deadlock
+        var stderrTask = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
+        var stderr = await stderrTask;
 
+        // ffmpeg returns 0 on success, non-zero on failure
         if (process.ExitCode != 0)
         {
-            Console.WriteLine($"[ERROR] Frame extraction failed: {stderr}");
+            // Only show last few lines of error
+            var errorLines = stderr.Split('\n').TakeLast(5);
+            Console.WriteLine($"[ERROR] Frame extraction failed (exit code {process.ExitCode}):");
+            foreach (var line in errorLines)
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                    Console.WriteLine($"        {line.Trim()}");
+            }
             return false;
         }
 
         var frameCount = Directory.GetFiles(outputDir, "frame_*.jpg").Length;
+        if (frameCount == 0)
+        {
+            Console.WriteLine("[ERROR] No frames extracted. Check if video file is valid.");
+            return false;
+        }
+
         Console.WriteLine($"[OK] Frames extracted: {frameCount} images saved to {outputDir}/");
         return true;
     }
@@ -275,30 +303,42 @@ string? FindExecutable(params string[] names)
     {
         foreach (var path in paths)
         {
-            var fullPath = Path.Combine(path, name);
-            if (File.Exists(fullPath)) return fullPath;
+            try
+            {
+                var fullPath = Path.Combine(path, name);
+                if (File.Exists(fullPath)) return fullPath;
+            }
+            catch { } // Ignore invalid paths
         }
     }
 
     // Common Windows paths
-    var commonPaths = new[]
+    if (OperatingSystem.IsWindows())
     {
-        @"C:\ffmpeg\bin",
-        @"C:\Program Files\ffmpeg\bin",
-        @"C:\tools\ffmpeg\bin",
-        Environment.ExpandEnvironmentVariables(@"%USERPROFILE%\scoop\shims"),
-    };
-
-    foreach (var basePath in commonPaths)
-    {
-        foreach (var name in names)
+        var commonPaths = new[]
         {
-            var fullPath = Path.Combine(basePath, name);
-            if (File.Exists(fullPath)) return fullPath;
+            @"C:\ffmpeg\bin",
+            @"C:\Program Files\ffmpeg\bin",
+            @"C:\tools\ffmpeg\bin",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "shims"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WinGet", "Links"),
+        };
+
+        foreach (var basePath in commonPaths)
+        {
+            foreach (var name in names)
+            {
+                try
+                {
+                    var fullPath = Path.Combine(basePath, name);
+                    if (File.Exists(fullPath)) return fullPath;
+                }
+                catch { }
+            }
         }
     }
 
-    // Try where command on Windows
+    // Try where/which command
     try
     {
         var cmd = OperatingSystem.IsWindows() ? "where" : "which";
@@ -311,12 +351,15 @@ string? FindExecutable(params string[] names)
             CreateNoWindow = true
         };
         using var process = Process.Start(psi);
-        process?.WaitForExit();
-        var output = process?.StandardOutput.ReadToEnd()?.Trim();
-        if (!string.IsNullOrEmpty(output))
+        if (process != null)
         {
-            var firstLine = output.Split('\n')[0].Trim();
-            if (File.Exists(firstLine)) return firstLine;
+            process.WaitForExit(5000); // 5 second timeout
+            var output = process.StandardOutput.ReadToEnd()?.Trim();
+            if (!string.IsNullOrEmpty(output))
+            {
+                var firstLine = output.Split('\n')[0].Trim();
+                if (File.Exists(firstLine)) return firstLine;
+            }
         }
     }
     catch { }
