@@ -1,6 +1,6 @@
 ---
 name: bilibili-analyzer
-description: 自动分析B站视频内容，提取关键帧，使用Claude Code AI分析并生成带截图的Markdown总结报告。
+description: 自动分析B站视频内容，下载视频并拆解成帧图片，使用AI分析并生成详细的专题文档或实操教程。
 metadata:
   short-description: B站视频AI分析工具
 source:
@@ -12,94 +12,111 @@ source:
 
 ## Description
 
-自动化B站视频内容分析工具。提供视频URL后，系统自动：
-1. 下载视频
-2. 每秒提取1帧图片
-3. 智能合并相似帧，减少冗余
-4. 提取音频并转文字（可选）
-5. 使用 Claude Code CLI 逐帧分析
-6. 生成带截图和时间戳的 `视频分析报告.md`
+B站视频内容分析工具。提供视频URL后，自动下载视频、拆解成帧图片，然后使用AI分析内容，最终生成**高质量的专题文档或实操教程**。
+
+**核心特点**:
+- 不是简单的时间线记录，而是**重新组织整理**成一篇完整的文档
+- 实操类视频 → 生成**可直接使用的操作教程**
+- 知识类视频 → 生成**结构化的专题文档**
+- 报告中插入关键截图，使用 `![描述](./images/frame_xxxx.jpg)` 格式
 
 ## Trigger
 
-- `/bilibili` 命令
+- `/bilibili-analyzer` 命令
 - 用户请求分析B站视频
-- 用户提供B站视频链接
+- 用户提供B站视频链接并要求分析
 
-## Usage
+## Workflow
+
+### Step 1: 下载视频并拆帧
+
+使用提供的脚本下载视频并拆解成帧图片：
 
 ```bash
-# 基本用法（每秒1帧，自动合并相似帧）
-python scripts/main.py "https://www.bilibili.com/video/BV1xx411c7mD"
-
-# 自定义帧间隔（每2秒1帧）
-python scripts/main.py "https://www.bilibili.com/video/BV1xx411c7mD" -i 2
-
-# 禁用音频分析（更快）
-python scripts/main.py "https://www.bilibili.com/video/BV1xx411c7mD" --no-audio
-
-# 调整相似帧阈值（0.9 = 更激进的合并）
-python scripts/main.py "https://www.bilibili.com/video/BV1xx411c7mD" -s 0.9
-
-# 指定输出目录
-python scripts/main.py "https://www.bilibili.com/video/BV1xx411c7mD" -o ./output
-
-# 短链接
-python scripts/main.py "https://b23.tv/xxxxx"
+python scripts/prepare.py "<视频URL>" -o <输出目录>
 ```
 
-## Parameters
+参数说明：
+- `-o, --output`: 输出目录，默认当前目录
+- `--fps`: 每秒提取帧数，默认1（长视频可用0.5或0.2）
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `url` | B站视频URL（必需） | - |
-| `-i, --interval` | 帧提取间隔（秒） | 1 |
-| `-m, --max-frames` | 最大帧数（0=不限制） | 0 |
-| `-s, --similarity` | 相似帧检测阈值（0-1） | 0.95 |
-| `-o, --output` | 输出目录 | ./bilibili |
-| `--no-audio` | 禁用音频提取和转录 | false |
-| `--whisper-model` | Whisper模型大小 | base |
-| `--language` | 音频语言代码 | zh |
-| `--scene-detection` | 启用场景变化检测 | false |
-| `--resume` | 断点续传 | false |
+执行后会生成：
+- `video.mp4` - 下载的视频
+- `images/` - 帧图片目录
 
-## Output Structure
+### Step 2: 分析帧图片
 
+使用 Task 工具并行分析 `images/` 目录中的图片，提取界面内容、文字、操作步骤等信息。
+
+### Step 3: 生成文档
+
+将分析结果**重新组织整理**成 `视频分析.md`：
+- 实操类视频 → 操作教程格式
+- 知识类视频 → 专题文档格式
+
+**重要**: 不要按时间线流水账，要像写文章一样组织内容。
+
+## 输出格式
+
+### 实操教程类
+
+```markdown
+# {教程主题}
+
+## 简介
+{教程目标和前置条件}
+
+## 环境准备
+{需要的软件和配置}
+
+## 操作步骤
+
+### 1. {步骤标题}
+{说明}
+![截图](./images/frame_xxxx.jpg)
+
+### 2. {步骤标题}
+...
+
+## 完整代码
+{汇总代码}
+
+## 总结
+{核心要点}
 ```
-bilibili/{video_title}/
-├── 视频分析报告.md      # 主报告文件
-├── images/              # 帧图片目录
-│   ├── frame_000001.jpg
-│   ├── frame_000002.jpg
-│   └── ...
-├── audio/               # 音频文件目录
-│   └── audio.wav
-├── transcript.json      # 音频转录结果
-└── manifest.json        # 帧清单
+
+### 知识文档类
+
+```markdown
+# {主题}
+
+## 概述
+{主题介绍}
+
+## {章节标题}
+{内容}
+![配图](./images/frame_xxxx.jpg)
+
+## 核心要点
+{总结}
 ```
 
 ## Requirements
 
-- **FFmpeg**: 帧提取和音频提取必需
-- **Python**: requests, yt-dlp, Pillow, imagehash
-- **Claude Code CLI**: AI分析必需（`claude` 命令）
-- **Whisper** (可选): 音频转文字（`pip install openai-whisper` 或 `pip install faster-whisper`）
+- **yt-dlp**: `pip install yt-dlp`
+- **ffmpeg**: https://ffmpeg.org/download.html
 
-详细安装说明见 [references/installation.md](references/installation.md)
+## 文档质量要求
 
-## References
-
-- [安装指南](references/installation.md) - 系统依赖和Python包安装
-- [常见问题](references/faq.md) - FAQ和错误处理
-- [改进计划](docs/plans/improvement-plan.md) - 开发计划文档
-
-## Examples
-
-- [基本使用示例](examples/basic-usage.md) - 常用场景和命令示例
+1. **不要时间线流水账** - 重新组织内容
+2. **结构清晰** - 有章节划分和逻辑顺序
+3. **配图恰当** - 路径用 `./images/frame_xxxx.jpg`
+4. **代码完整** - 可直接复制使用
+5. **独立可读** - 不看视频也能理解
 
 ## Tags
 
-`bilibili`, `video-analysis`, `ai`, `frame-extraction`, `markdown`, `claude-code`
+`bilibili`, `video-analysis`, `ai`, `frame-extraction`, `markdown`, `tutorial`
 
 ## Compatibility
 

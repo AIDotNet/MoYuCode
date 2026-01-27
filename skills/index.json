@@ -330,10 +330,10 @@
     {
       "slug": "tools/bilibili-analyzer",
       "name": "Bilibili Analyzer",
-      "summary": "自动分析B站视频内容，提取关键帧，使用Claude Code AI分析并生成带截图的Markdown总结报告。",
-      "description": "Bilibili视频分析器是一个自动化视频内容分析工具。提供B站视频URL后，系统会自动下载视频、每秒提取1帧图片、智能合并相似帧、提取音频并转文字、使用Claude Code CLI逐帧分析，并生成包含截图和时间戳的Markdown总结报告。支持相似帧检测、音频转录、断点续传等高级功能。",
+      "summary": "自动分析B站视频内容，下载视频并拆解成帧图片，使用AI分析并生成详细的专题文档或实操教程。",
+      "description": "B站视频内容分析工具。提供视频URL后，使用脚本下载视频并拆解成帧图片，然后AI分析内容，生成高质量的专题文档或实操教程。不是时间线流水账，而是重新组织整理成完整文档。",
       "visibility": "public",
-      "tags": ["bilibili", "video-analysis", "ai", "frame-extraction", "markdown", "automation", "yt-dlp", "ffmpeg", "chinese", "claude-code", "whisper"],
+      "tags": ["bilibili", "video-analysis", "ai", "frame-extraction", "markdown", "tutorial"],
       "services": {
         "codex": { "compatible": true },
         "claudecode": { "compatible": true }
@@ -345,29 +345,11 @@
         "basePath": "skills/tools/bilibili-analyzer",
         "files": [
           { "path": "SKILL.md", "sha256": "PENDING" },
-          { "path": "references/installation.md", "sha256": "PENDING" },
-          { "path": "references/faq.md", "sha256": "PENDING" },
-          { "path": "examples/basic-usage.md", "sha256": "PENDING" },
-          { "path": "scripts/__init__.py", "sha256": "PENDING" },
-          { "path": "scripts/main.py", "sha256": "PENDING" },
-          { "path": "scripts/models.py", "sha256": "PENDING" },
-          { "path": "scripts/exceptions.py", "sha256": "PENDING" },
-          { "path": "scripts/url_parser.py", "sha256": "PENDING" },
-          { "path": "scripts/metadata_fetcher.py", "sha256": "PENDING" },
-          { "path": "scripts/video_downloader.py", "sha256": "PENDING" },
-          { "path": "scripts/frame_extractor.py", "sha256": "PENDING" },
-          { "path": "scripts/frame_similarity.py", "sha256": "PENDING" },
-          { "path": "scripts/audio_extractor.py", "sha256": "PENDING" },
-          { "path": "scripts/audio_transcriber.py", "sha256": "PENDING" },
-          { "path": "scripts/claude_cli_analyzer.py", "sha256": "PENDING" },
-          { "path": "scripts/incremental_report.py", "sha256": "PENDING" },
-          { "path": "scripts/ai_analyzer.py", "sha256": "PENDING" },
-          { "path": "scripts/report_generator.py", "sha256": "PENDING" },
-          { "path": "scripts/logger.py", "sha256": "PENDING" }
+          { "path": "scripts/prepare.py", "sha256": "PENDING" }
         ]
       },
-      "version": "2.0.0",
-      "buildId": "20260128.1",
+      "version": "3.0.0",
+      "buildId": "20260128.3",
       "status": "active",
       "updatedAt": "2026-01-28T00:00:00Z"
     }
