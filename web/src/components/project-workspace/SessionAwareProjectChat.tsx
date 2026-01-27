@@ -133,6 +133,17 @@ export function SessionAwareProjectChat({
     }
   }, [updateSessionTitle]);
 
+  // Handle first message - update session title
+  const handleFirstMessage = useCallback(async (text: string) => {
+    if (currentSession?.id) {
+      try {
+        await updateSessionTitle(currentSession.id, text);
+      } catch (error) {
+        console.error('Failed to update session title:', error);
+      }
+    }
+  }, [currentSession?.id, updateSessionTitle]);
+
   // Toggle session panel
   const toggleSessionPanel = useCallback(() => {
     setSessionPanelOpen(prev => !prev);
@@ -212,6 +223,7 @@ export function SessionAwareProjectChat({
             onToolOutput={onToolOutput}
             currentToolType={currentToolType}
             sessionId={currentSession?.id}
+            onFirstMessage={handleFirstMessage}
           />
         </div>
       </div>

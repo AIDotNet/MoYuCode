@@ -158,7 +158,7 @@ public sealed class SessionManager
     /// </summary>
     public async Task SyncProjectSessionTitlesAsync(Guid projectId)
     {
-        var project = _dataStore.GetProject(projectId);
+        var project = _dataStore.GetProjectWithProvider(projectId);
         if (project == null) return;
 
         var sessions = _dataStore.GetSessionsByProject(projectId);
@@ -167,7 +167,7 @@ public sealed class SessionManager
         bool changed = false;
         var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-        if (string.Equals(project.ToolType, "Codex", StringComparison.OrdinalIgnoreCase))
+        if (project.ToolType == ToolType.Codex)
         {
             var historyPath = Path.Combine(userHome, ".codex", "history.jsonl");
             if (File.Exists(historyPath))
@@ -232,7 +232,7 @@ public sealed class SessionManager
                 }
             }
         }
-        else if (string.Equals(project.ToolType, "ClaudeCode", StringComparison.OrdinalIgnoreCase))
+        else if (project.ToolType == ToolType.ClaudeCode)
         {
             foreach (var session in sessions)
             {

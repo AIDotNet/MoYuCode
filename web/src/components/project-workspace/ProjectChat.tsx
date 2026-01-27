@@ -2311,6 +2311,37 @@ function insertAfterMessage(
   return next
 }
 
+// 插入 tool 消息时，找到最后一个 tool 消息或锚点消息，确保新 tool 在正确位置
+function insertToolMessage(
+  prev: ChatMessage[],
+  anchorMessageId: string | null | undefined,
+  message: ChatMessage,
+): ChatMessage[] {
+  // 先找锚点位置
+  let anchorIndex = anchorMessageId ? prev.findIndex((m) => m.id === anchorMessageId) : -1
+  
+  // 从锚点位置向后找最后一个连续的 tool 消息
+  if (anchorIndex >= 0) {
+    let lastToolIndex = anchorIndex
+    for (let i = anchorIndex + 1; i < prev.length; i++) {
+      if (prev[i].kind === 'tool' && prev[i].role === 'agent') {
+        lastToolIndex = i
+      } else {
+        break
+      }
+    }
+    // 如果找到了 tool 消息，在最后一个 tool 后面插入
+    if (lastToolIndex > anchorIndex || (prev[anchorIndex]?.kind === 'tool' && prev[anchorIndex]?.role === 'agent')) {
+      const next = [...prev]
+      next.splice(lastToolIndex + 1, 0, message)
+      return next
+    }
+  }
+  
+  // 否则使用默认的插入逻辑
+  return insertAfterMessage(prev, anchorMessageId, message)
+}
+
 export function ProjectChat({
   project,
   detailsOpen,
@@ -3543,6 +3574,14 @@ export function ProjectChat({
     if (sending) return
     if ((!text && readyImages.length === 0) || hasBlockingUploads) return
 
+    // 如果是第一条消息，通知父组件（用于设置会话标题）
+    const isFirstMessage = messages.length === 0
+    if (isFirstMessage && text && onFirstMessage) {
+      // 截取前50个字符作为标题
+      const title = text.length > 50 ? text.slice(0, 47) + '...' : text
+      onFirstMessage(title)
+    }
+
     setChatError(null)
     setDraft('')
     setMentionToken(null)
@@ -3986,7 +4025,7 @@ export function ProjectChat({
                   return next
                 }
                 inserted = true
-                return insertAfterMessage(prev, anchorAfterId, toolMessage)
+                return insertToolMessage(prev, anchorAfterId, toolMessage)
               })
 
               if (inserted) {
@@ -4048,7 +4087,7 @@ export function ProjectChat({
                 }
 
                 inserted = true
-                return insertAfterMessage(prev, anchorAfterId, toolMessage)
+                return insertToolMessage(prev, anchorAfterId, toolMessage)
               })
 
               if (inserted) {
@@ -4142,7 +4181,7 @@ export function ProjectChat({
               }
 
               const anchorAfterId = streamTailMessageId
-              setMessages((prev) => insertAfterMessage(prev, anchorAfterId, toolMessage))
+              setMessages((prev) => insertToolMessage(prev, anchorAfterId, toolMessage))
               toolChainTailMessageId = toolMessageId
               markStreamTail('tool', toolMessageId)
 
@@ -4246,7 +4285,9 @@ export function ProjectChat({
     apiBase,
     draft,
     draftImages,
+    messages.length,
     modelSelection,
+    onFirstMessage,
     onToolOutput,
     project.id,
     project.toolType,
