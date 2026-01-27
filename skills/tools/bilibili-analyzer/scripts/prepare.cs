@@ -1,11 +1,13 @@
 #!/usr/bin/env dotnet run
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -25,8 +27,15 @@ if (!double.TryParse(fpsStr, NumberStyles.Float, CultureInfo.InvariantCulture, o
     Console.WriteLine($"[ERROR] Invalid fps value: {fpsStr}");
     Environment.Exit(1);
 }
+var similarityStr = GetArgValue(args, "--similarity") ?? "0.80";
+if (!double.TryParse(similarityStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var similarityThreshold))
+{
+    Console.WriteLine($"[ERROR] Invalid similarity value: {similarityStr}");
+    Environment.Exit(1);
+}
 var videoOnly = args.Contains("--video-only");
 var framesOnly = args.Contains("--frames-only");
+var noDedup = args.Contains("--no-dedup");
 
 var videoPath = Path.Combine(outputDir, "video.mp4");
 var imagesDir = Path.Combine(outputDir, "images");
@@ -40,6 +49,8 @@ Console.WriteLine(new string('=', 50));
 Console.WriteLine($"URL: {url}");
 Console.WriteLine($"Output: {outputDir}");
 Console.WriteLine($"FPS: {fps}");
+Console.WriteLine($"Similarity Threshold: {similarityThreshold:P0}");
+Console.WriteLine($"Deduplication: {(noDedup ? "Disabled" : "Enabled")}");
 Console.WriteLine(new string('=', 50));
 
 // Download video
@@ -63,6 +74,12 @@ if (!videoOnly)
     if (!await ExtractFramesAsync(videoPath, imagesDir, fps))
     {
         Environment.Exit(1);
+    }
+
+    // Deduplicate similar frames
+    if (!noDedup)
+    {
+        await DeduplicateFramesAsync(imagesDir, similarityThreshold);
     }
 }
 
@@ -294,6 +311,170 @@ async Task<bool> ExtractFramesAsync(string videoPath, string outputDir, double f
     }
 }
 
+async Task DeduplicateFramesAsync(string imagesDir, double threshold)
+{
+    Console.WriteLine($"[INFO] Deduplicating similar frames (threshold: {threshold:P0})...");
+
+    var files = Directory.GetFiles(imagesDir, "frame_*.jpg")
+        .OrderBy(f => f)
+        .ToList();
+
+    if (files.Count < 2)
+    {
+        Console.WriteLine("[INFO] Not enough frames to deduplicate");
+        return;
+    }
+
+    var toDelete = new List<string>();
+    var ffmpeg = FindExecutable("ffmpeg", "ffmpeg.exe");
+
+    if (ffmpeg == null)
+    {
+        Console.WriteLine("[WARN] ffmpeg not found, skipping deduplication");
+        return;
+    }
+
+    // Compare consecutive frames only (not cross-frame comparison)
+    for (int i = 0; i < files.Count - 1; i++)
+    {
+        var current = files[i];
+        var next = files[i + 1];
+
+        // Skip if current frame is already marked for deletion
+        if (toDelete.Contains(current))
+            continue;
+
+        var similarity = await CalculateFrameSimilarityAsync(ffmpeg, current, next);
+
+        if (similarity >= threshold)
+        {
+            // Keep the first frame, mark the next one for deletion
+            toDelete.Add(next);
+        }
+    }
+
+    // Delete similar frames
+    foreach (var file in toDelete)
+    {
+        try
+        {
+            File.Delete(file);
+        }
+        catch { }
+    }
+
+    // Renumber remaining frames
+    var remainingFiles = Directory.GetFiles(imagesDir, "frame_*.jpg")
+        .OrderBy(f => f)
+        .ToList();
+
+    for (int i = 0; i < remainingFiles.Count; i++)
+    {
+        var newName = Path.Combine(imagesDir, $"frame_{i + 1:D4}.jpg");
+        if (remainingFiles[i] != newName)
+        {
+            // Use temp name to avoid conflicts
+            var tempName = Path.Combine(imagesDir, $"temp_{i + 1:D4}.jpg");
+            File.Move(remainingFiles[i], tempName);
+        }
+    }
+
+    // Rename temp files to final names
+    var tempFiles = Directory.GetFiles(imagesDir, "temp_*.jpg").OrderBy(f => f).ToList();
+    for (int i = 0; i < tempFiles.Count; i++)
+    {
+        var finalName = Path.Combine(imagesDir, $"frame_{i + 1:D4}.jpg");
+        File.Move(tempFiles[i], finalName);
+    }
+
+    var finalCount = Directory.GetFiles(imagesDir, "frame_*.jpg").Length;
+    Console.WriteLine($"[OK] Deduplication complete: {files.Count} -> {finalCount} frames (removed {toDelete.Count} similar frames)");
+}
+
+async Task<double> CalculateFrameSimilarityAsync(string ffmpeg, string file1, string file2)
+{
+    try
+    {
+        // Use ffmpeg to calculate PSNR (Peak Signal-to-Noise Ratio) between two images
+        // Higher PSNR = more similar images
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpeg,
+            Arguments = $"-i \"{file1}\" -i \"{file2}\" -lavfi \"psnr\" -f null -",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi);
+        if (process == null) return 0;
+
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var stderr = await stderrTask;
+
+        // Parse PSNR value from output
+        // Format: [Parsed_psnr_0 @ ...] PSNR y:XX.XX u:XX.XX v:XX.XX average:XX.XX min:XX.XX max:XX.XX
+        var match = Regex.Match(stderr, @"average:(\d+\.?\d*)", RegexOptions.IgnoreCase);
+        if (match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var psnr))
+        {
+            // Convert PSNR to similarity percentage
+            // PSNR > 40 dB is considered very similar (>95%)
+            // PSNR > 30 dB is considered similar (>80%)
+            // PSNR = infinity means identical images
+            if (psnr > 100) return 1.0; // Identical or near-identical
+            if (psnr > 40) return 0.95 + (psnr - 40) * 0.001;
+            if (psnr > 30) return 0.80 + (psnr - 30) * 0.015;
+            if (psnr > 20) return 0.50 + (psnr - 20) * 0.03;
+            return psnr * 0.025;
+        }
+
+        // Fallback: use simpler SSIM if PSNR parsing fails
+        return await CalculateSSIMAsync(ffmpeg, file1, file2);
+    }
+    catch
+    {
+        return 0;
+    }
+}
+
+async Task<double> CalculateSSIMAsync(string ffmpeg, string file1, string file2)
+{
+    try
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpeg,
+            Arguments = $"-i \"{file1}\" -i \"{file2}\" -lavfi \"ssim\" -f null -",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi);
+        if (process == null) return 0;
+
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var stderr = await stderrTask;
+
+        // Parse SSIM value: All:0.XXXXX
+        var match = Regex.Match(stderr, @"All:(\d+\.?\d*)", RegexOptions.IgnoreCase);
+        if (match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var ssim))
+        {
+            return ssim; // SSIM is already 0-1 range
+        }
+
+        return 0;
+    }
+    catch
+    {
+        return 0;
+    }
+}
+
 string? FindExecutable(params string[] names)
 {
     var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
@@ -393,6 +574,8 @@ Arguments:
 Options:
   -o, --output <dir>     Output directory (default: current)
   --fps <value>          Frames per second (default: 1.0)
+  --similarity <value>   Similarity threshold for deduplication (default: 0.80)
+  --no-dedup             Disable frame deduplication
   --video-only           Only download video, skip frame extraction
   --frames-only          Only extract frames (requires existing video.mp4)
   -h, --help             Show this help
@@ -401,6 +584,13 @@ Examples:
   dotnet run prepare.cs ""https://www.bilibili.com/video/BV1xx411c7mD""
   dotnet run prepare.cs ""https://www.bilibili.com/video/BV1xx411c7mD"" --fps 0.5
   dotnet run prepare.cs ""https://www.bilibili.com/video/BV1xx411c7mD"" -o ./output
+  dotnet run prepare.cs ""https://www.bilibili.com/video/BV1xx411c7mD"" --similarity 0.85
+  dotnet run prepare.cs ""https://www.bilibili.com/video/BV1xx411c7mD"" --no-dedup
+
+Deduplication:
+  Consecutive frames with similarity >= threshold will be deduplicated.
+  Only compares adjacent frames (not cross-frame comparison).
+  Uses ffmpeg SSIM/PSNR for accurate similarity calculation.
 
 Requirements:
   - .NET 10 SDK

@@ -110,8 +110,20 @@ dotnet run scripts/prepare.cs "https://www.bilibili.com/video/BV1xx411c7mD" -o .
 | `url` | B站视频URL（必需） | - |
 | `-o, --output` | 输出目录 | 当前目录 |
 | `--fps` | 每秒提取帧数 | 1.0 |
+| `--similarity` | 相似度阈值（0-1），超过此值的相邻帧会被去重 | 0.80 |
+| `--no-dedup` | 禁用相似帧去重 | false |
 | `--video-only` | 只下载视频，不提取帧 | false |
 | `--frames-only` | 只提取帧（需已有video.mp4） | false |
+
+### 相似帧去重
+
+脚本会自动对**相邻帧**进行相似度检测，去除相似度超过阈值（默认80%）的重复帧：
+
+- 使用 ffmpeg 的 SSIM/PSNR 算法计算相似度
+- **只比较相邻帧**，不会跨帧比较
+- 去重后自动重新编号（frame_0001.jpg, frame_0002.jpg, ...）
+- 可通过 `--similarity 0.85` 调整阈值
+- 可通过 `--no-dedup` 禁用去重
 
 ### 输出结构
 
