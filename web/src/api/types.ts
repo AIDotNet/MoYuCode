@@ -386,3 +386,29 @@ export type SkillPackageDto = {
   basePath: string
   files: SkillPackageFileDto[]
 }
+
+// Content Search Types
+export type ContentSearchRequest = {
+  path: string
+  query: string
+  isRegex?: boolean
+  caseSensitive?: boolean
+  maxResults?: number
+}
+
+export type ContentSearchMatch = {
+  filePath: string
+  lineNumber: number
+  lineContent: string
+  matchStart: number
+  matchEnd: number
+}
+
+export type ContentSearchResponse = {
+  query: string
+  isRegex: boolean
+  caseSensitive: boolean
+  matches: ContentSearchMatch[]
+  totalMatches: number
+  truncated: boolean
+}

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useEffect } from 'react'
+import { useCallback, useRef, useState, useEffect, Suspense } from 'react'
 import { cn } from '@/lib/utils'
 import {
   useWorkspaceStore,
@@ -6,13 +6,15 @@ import {
   SIDEBAR_MAX_WIDTH_RATIO,
   PANEL_MIN_HEIGHT,
   PANEL_MAX_HEIGHT_RATIO,
+  type CodeSelectionInfo,
 } from '@/stores/workspaceStore'
 import { ActivityBar } from './ActivityBar'
 import { Sidebar } from './Sidebar'
 import { EditorArea } from './EditorArea'
 import { BottomPanel } from './BottomPanel'
 import { ResizeHandle } from './ResizeHandle'
-import { QuickOpen } from './QuickOpen'
+import { LazyQuickOpen, LoadingFallback } from './LazyComponents'
+import { useWorkspaceKeyboard } from '@/hooks/useWorkspaceKeyboard'
 
 /**
  * WorkspaceLayout 组件属性
@@ -24,6 +26,8 @@ export interface WorkspaceLayoutProps {
   className?: string
   /** 子元素（可选，用于扩展） */
   children?: React.ReactNode
+  /** 代码选择发送到聊天的回调 */
+  onCodeSelectionToChat?: (selection: CodeSelectionInfo) => void
 }
 
 /**
@@ -55,9 +59,27 @@ export function WorkspaceLayout({
   workspacePath,
   className,
   children,
+  onCodeSelectionToChat,
 }: WorkspaceLayoutProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const editorAreaRef = useRef<HTMLDivElement>(null)
+
+  // 注册工作区快捷键
+  useWorkspaceKeyboard()
+
+  // 监听待发送的代码选择
+  const pendingChatSelection = useWorkspaceStore((state) => state.pendingChatSelection)
+  const consumePendingChatSelection = useWorkspaceStore((state) => state.consumePendingChatSelection)
+
+  // 当有待发送的代码选择时，调用回调
+  useEffect(() => {
+    if (pendingChatSelection && onCodeSelectionToChat) {
+      const selection = consumePendingChatSelection()
+      if (selection) {
+        onCodeSelectionToChat(selection)
+      }
+    }
+  }, [pendingChatSelection, onCodeSelectionToChat, consumePendingChatSelection])
 
   // 存储容器尺寸的状态
   const [containerWidth, setContainerWidth] = useState(window.innerWidth)
@@ -159,7 +181,7 @@ export function WorkspaceLayout({
       <div ref={editorAreaRef} className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* 编辑器主区域 */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          <EditorArea />
+          <EditorArea workspacePath={workspacePath} />
         </div>
 
         {/* 底部面板拖拽手柄 */}
@@ -175,11 +197,13 @@ export function WorkspaceLayout({
         )}
 
         {/* 底部面板 */}
-        <BottomPanel />
+        <BottomPanel workspacePath={workspacePath} />
       </div>
 
-      {/* 快速打开弹窗 */}
-      <QuickOpen />
+      {/* 快速打开弹窗（懒加载） */}
+      <Suspense fallback={<LoadingFallback />}>
+        <LazyQuickOpen workspacePath={workspacePath} />
+      </Suspense>
 
       {/* 扩展内容 */}
       {children}

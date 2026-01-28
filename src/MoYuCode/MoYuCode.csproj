@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
@@ -6,13 +6,15 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
-        <Version>0.0.2.2</Version>
-        <AssemblyVersion>0.0.2.2</AssemblyVersion>
+        <UserSecretsId>ced3d294-5be5-498e-9b04-9b0609d535ab</UserSecretsId>
+        <DockerfileContext>..\..</DockerfileContext>
+        <DockerComposeProjectPath>..\..\docker-compose.dcproj</DockerComposeProjectPath>
     </PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
         <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.1" />
+        <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
         <PackageReference Include="Quick.PtyNet" Version="1.0.3" />
         <PackageReference Include="Quick.PtyNet.WinPty" Version="1.0.1" />
         <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
@@ -34,10 +36,7 @@
 
     <Target Name="EnsureFavicon" BeforeTargets="GenerateEmbeddedFilesManifest">
         <MakeDir Directories="wwwroot" Condition="!Exists('wwwroot')" />
-        <Copy SourceFiles="favicon.png"
-              DestinationFiles="wwwroot\favicon.png"
-              SkipUnchangedFiles="true"
-              Condition="Exists('favicon.png') and !Exists('wwwroot\favicon.png')" />
+        <Copy SourceFiles="favicon.png" DestinationFiles="wwwroot\favicon.png" SkipUnchangedFiles="true" Condition="Exists('favicon.png') and !Exists('wwwroot\favicon.png')" />
     </Target>
 
 </Project>

@@ -1,8 +1,12 @@
+import { Suspense } from 'react'
 import { cn } from '@/lib/utils'
 import { useWorkspaceStore, SIDEBAR_MIN_WIDTH } from '@/stores/workspaceStore'
 import { FileExplorer } from './FileExplorer'
-import { SearchPanel } from './SearchPanel'
-import { GitPanel } from './GitPanel'
+import { 
+  LazySearchPanel, 
+  LazyGitPanel, 
+  PanelLoadingFallback 
+} from './LazyComponents'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 /**
@@ -60,15 +64,23 @@ export function Sidebar({ workspacePath, className }: SidebarProps) {
   // 获取当前视图配置
   const viewConfig = VIEW_CONFIG[activeView] || VIEW_CONFIG.explorer
 
-  // 根据当前视图渲染对应的面板
+  // 根据当前视图渲染对应的面板（使用懒加载）
   const renderPanel = () => {
     switch (activeView) {
       case 'explorer':
         return <FileExplorer workspacePath={workspacePath} />
       case 'search':
-        return <SearchPanel />
+        return (
+          <Suspense fallback={<PanelLoadingFallback />}>
+            <LazySearchPanel workspacePath={workspacePath} />
+          </Suspense>
+        )
       case 'git':
-        return <GitPanel />
+        return (
+          <Suspense fallback={<PanelLoadingFallback />}>
+            <LazyGitPanel workspacePath={workspacePath} />
+          </Suspense>
+        )
       case 'terminal':
         // 终端视图时显示文件资源管理器
         return <FileExplorer workspacePath={workspacePath} />

@@ -1,0 +1,6 @@
+services:
+  moyucode:
+    image: ${DOCKER_REGISTRY-}moyucode
+    build:
+      context: .
+      dockerfile: src/MoYuCode/Dockerfile

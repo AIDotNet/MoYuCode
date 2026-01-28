@@ -286,6 +286,7 @@ export function EditorTabs({ className }: EditorTabsProps) {
     <div
       className={cn(
         'relative flex items-center h-9 bg-muted/30 border-b border-border',
+        'min-w-0 overflow-hidden',
         className
       )}
     >
@@ -308,7 +309,7 @@ export function EditorTabs({ className }: EditorTabsProps) {
       <div
         ref={tabsContainerRef}
         className={cn(
-          'flex items-center h-full overflow-x-auto',
+          'flex items-center h-full flex-1 min-w-0 overflow-x-auto',
           'scrollbar-none',
           canScrollLeft && 'pl-6',
           canScrollRight && 'pr-6'
@@ -325,7 +326,7 @@ export function EditorTabs({ className }: EditorTabsProps) {
               key={tab.id}
               className={cn(
                 'group flex items-center gap-1.5 h-full px-3 cursor-pointer',
-                'border-r border-border',
+                'border-r border-border flex-shrink-0',
                 'hover:bg-muted/50 transition-colors',
                 isActive
                   ? 'bg-background border-t-2 border-t-primary'

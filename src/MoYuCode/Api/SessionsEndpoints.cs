@@ -15,42 +15,42 @@ public static class SessionsEndpoints
         // POST /api/sessions - 创建会话
         group.MapPost("/sessions", CreateSession)
             .WithName("CreateSession")
-            .WithOpenApi();
+            ;
 
         // GET /api/projects/{projectId}/managed-sessions - 获取项目会话列表（自管理会话）
         group.MapGet("/projects/{projectId:guid}/managed-sessions", GetProjectSessions)
             .WithName("GetProjectSessions")
-            .WithOpenApi();
+            ;
 
         // GET /api/sessions/running - 获取运行中会话
         group.MapGet("/sessions/running", GetRunningSessions)
             .WithName("GetRunningSessions")
-            .WithOpenApi();
+            ;
 
         // PUT /api/projects/{projectId}/current-session - 切换当前会话
         group.MapPut("/projects/{projectId:guid}/current-session", SwitchCurrentSession)
             .WithName("SwitchCurrentSession")
-            .WithOpenApi();
+            ;
 
         // GET /api/sessions/{sessionId}/messages - 获取会话消息
         group.MapGet("/sessions/{sessionId:guid}/messages", GetSessionMessages)
             .WithName("GetSessionMessages")
-            .WithOpenApi();
+            ;
 
         // DELETE /api/sessions/{sessionId} - 删除会话
         group.MapDelete("/sessions/{sessionId:guid}", DeleteSession)
             .WithName("DeleteSession")
-            .WithOpenApi();
+            ;
 
         // GET /api/sessions/{sessionId} - 获取会话详情
         group.MapGet("/sessions/{sessionId:guid}", GetSession)
             .WithName("GetSession")
-            .WithOpenApi();
+            ;
 
         // PATCH /api/sessions/{sessionId} - 更新会话
         group.MapPatch("/sessions/{sessionId:guid}", UpdateSession)
             .WithName("UpdateSession")
-            .WithOpenApi();
+            ;
     }
 
     private static async Task<IResult> CreateSession(

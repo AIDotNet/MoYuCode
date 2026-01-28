@@ -63,6 +63,61 @@ export interface SearchResult {
   matchEnd: number
 }
 
+/**
+ * 文件索引条目类型
+ */
+export interface FileIndexEntry {
+  /** 文件名 */
+  name: string
+  /** 完整路径 */
+  fullPath: string
+  /** 相对路径（相对于工作区根目录） */
+  relativePath: string
+}
+
+/**
+ * 输出项类型
+ */
+export type OutputType = 'info' | 'warning' | 'error' | 'success' | 'tool'
+
+/**
+ * 输出项接口
+ */
+export interface OutputItem {
+  /** 唯一标识符 */
+  id: string
+  /** 时间戳 */
+  timestamp: Date
+  /** 输出类型 */
+  type: OutputType
+  /** 输出内容 */
+  content: string
+  /** 来源 */
+  source?: string
+  /** 工具名称（仅 tool 类型） */
+  toolName?: string
+  /** 工具参数（仅 tool 类型） */
+  toolArgs?: Record<string, unknown>
+  /** 工具执行结果（仅 tool 类型） */
+  toolResult?: string
+  /** 工具执行状态（仅 tool 类型） */
+  toolStatus?: 'running' | 'success' | 'error'
+}
+
+/**
+ * 代码选择信息
+ */
+export interface CodeSelectionInfo {
+  /** 文件路径 */
+  filePath: string
+  /** 起始行号 */
+  startLine: number
+  /** 结束行号 */
+  endLine: number
+  /** 选中的代码文本 */
+  text: string
+}
+
 // ============================================================================
 // 布局约束常量
 // ============================================================================
@@ -146,6 +201,30 @@ export interface WorkspaceState {
   // -------------------------------------------------------------------------
   /** 快速打开弹窗是否可见 */
   quickOpenVisible: boolean
+  /** 最近打开的文件列表（路径） */
+  recentFiles: string[]
+  /** 工作区文件索引（用于快速搜索） */
+  fileIndex: FileIndexEntry[]
+  /** 文件索引是否正在加载 */
+  fileIndexLoading: boolean
+
+  // -------------------------------------------------------------------------
+  // 输出面板状态
+  // -------------------------------------------------------------------------
+  /** 输出项列表 */
+  outputs: OutputItem[]
+  /** 输出搜索查询 */
+  outputSearchQuery: string
+  /** 输出类型过滤 */
+  outputTypeFilter: OutputType | 'all'
+
+  // -------------------------------------------------------------------------
+  // 代码选择状态
+  // -------------------------------------------------------------------------
+  /** 当前代码选择信息 */
+  codeSelection: CodeSelectionInfo | null
+  /** 待发送到聊天的代码选择（用于跨组件通信） */
+  pendingChatSelection: CodeSelectionInfo | null
 }
 
 /**
@@ -245,6 +324,40 @@ export interface WorkspaceActions {
   closeQuickOpen: () => void
   /** 切换快速打开弹窗 */
   toggleQuickOpen: () => void
+  /** 添加最近打开的文件 */
+  addRecentFile: (path: string) => void
+  /** 清空最近文件记录 */
+  clearRecentFiles: () => void
+  /** 设置文件索引 */
+  setFileIndex: (entries: FileIndexEntry[]) => void
+  /** 设置文件索引加载状态 */
+  setFileIndexLoading: (loading: boolean) => void
+
+  // -------------------------------------------------------------------------
+  // 输出面板 Actions
+  // -------------------------------------------------------------------------
+  /** 添加输出项 */
+  addOutput: (item: Omit<OutputItem, 'id' | 'timestamp'>) => string
+  /** 更新输出项（用于更新工具执行状态） */
+  updateOutput: (id: string, updates: Partial<OutputItem>) => void
+  /** 清空输出 */
+  clearOutputs: () => void
+  /** 设置输出搜索查询 */
+  setOutputSearchQuery: (query: string) => void
+  /** 设置输出类型过滤 */
+  setOutputTypeFilter: (filter: OutputType | 'all') => void
+
+  // -------------------------------------------------------------------------
+  // 代码选择 Actions
+  // -------------------------------------------------------------------------
+  /** 设置代码选择 */
+  setCodeSelection: (selection: CodeSelectionInfo | null) => void
+  /** 清空代码选择 */
+  clearCodeSelection: () => void
+  /** 发送代码选择到聊天（设置 pendingChatSelection） */
+  sendCodeSelectionToChat: (selection: CodeSelectionInfo) => void
+  /** 消费待发送的代码选择（聊天组件调用后清空） */
+  consumePendingChatSelection: () => CodeSelectionInfo | null
 
   // -------------------------------------------------------------------------
   // 工具方法
@@ -289,6 +402,18 @@ const defaultState: WorkspaceState = {
 
   // 快速打开
   quickOpenVisible: false,
+  recentFiles: [],
+  fileIndex: [],
+  fileIndexLoading: false,
+
+  // 输出面板
+  outputs: [],
+  outputSearchQuery: '',
+  outputTypeFilter: 'all',
+
+  // 代码选择
+  codeSelection: null,
+  pendingChatSelection: null,
 }
 
 // ============================================================================
@@ -392,6 +517,9 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       // -----------------------------------------------------------------------
       openFile: (path, title, iconUrl) => {
         const state = get()
+
+        // 添加到最近文件记录
+        get().addRecentFile(path)
 
         // P2: 标签页唯一性 - 检查是否已存在相同路径的标签页
         const existingTab = state.openTabs.find(
@@ -512,7 +640,8 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       // 终端 Actions
       // -----------------------------------------------------------------------
       createTerminal: (cwd = '~', title) => {
-        const id = generateId()
+        // 终端 ID 必须是 36 字符的 UUID 格式，因为 TerminalMuxClient 有严格验证
+        const id = crypto.randomUUID()
         const terminalTitle = title || `Terminal ${get().terminals.length + 1}`
 
         const newTerminal: TerminalInstance = {
@@ -612,6 +741,88 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         set((state) => ({ quickOpenVisible: !state.quickOpenVisible }))
       },
 
+      addRecentFile: (path) => {
+        set((state) => {
+          // 移除已存在的相同路径，然后添加到开头
+          const filtered = state.recentFiles.filter((p) => p !== path)
+          // 最多保留 20 个最近文件
+          const newRecentFiles = [path, ...filtered].slice(0, 20)
+          return { recentFiles: newRecentFiles }
+        })
+      },
+
+      clearRecentFiles: () => {
+        set({ recentFiles: [] })
+      },
+
+      setFileIndex: (entries) => {
+        set({ fileIndex: entries })
+      },
+
+      setFileIndexLoading: (loading) => {
+        set({ fileIndexLoading: loading })
+      },
+
+      // -----------------------------------------------------------------------
+      // 输出面板 Actions
+      // -----------------------------------------------------------------------
+      addOutput: (item) => {
+        const id = generateId()
+        const newItem: OutputItem = {
+          ...item,
+          id,
+          timestamp: new Date(),
+        }
+        set((state) => ({
+          outputs: [...state.outputs, newItem],
+        }))
+        return id
+      },
+
+      updateOutput: (id, updates) => {
+        set((state) => ({
+          outputs: state.outputs.map((o) =>
+            o.id === id ? { ...o, ...updates } : o
+          ),
+        }))
+      },
+
+      clearOutputs: () => {
+        set({ outputs: [] })
+      },
+
+      setOutputSearchQuery: (query) => {
+        set({ outputSearchQuery: query })
+      },
+
+      setOutputTypeFilter: (filter) => {
+        set({ outputTypeFilter: filter })
+      },
+
+      // -----------------------------------------------------------------------
+      // 代码选择 Actions
+      // -----------------------------------------------------------------------
+      setCodeSelection: (selection) => {
+        set({ codeSelection: selection })
+      },
+
+      clearCodeSelection: () => {
+        set({ codeSelection: null })
+      },
+
+      sendCodeSelectionToChat: (selection) => {
+        set({ pendingChatSelection: selection })
+      },
+
+      consumePendingChatSelection: () => {
+        const state = get()
+        const selection = state.pendingChatSelection
+        if (selection) {
+          set({ pendingChatSelection: null })
+        }
+        return selection
+      },
+
       // -----------------------------------------------------------------------
       // 工具方法
       // -----------------------------------------------------------------------
@@ -630,7 +841,8 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         panelVisible: state.panelVisible,
         panelHeight: state.panelHeight,
         activePanelTab: state.activePanelTab,
-        // 不持久化：openTabs, terminals, searchQuery, searchResults, quickOpenVisible
+        recentFiles: state.recentFiles,
+        // 不持久化：openTabs, terminals, searchQuery, searchResults, quickOpenVisible, fileIndex
         // 这些是运行时状态，不需要跨会话保持
       }),
     }

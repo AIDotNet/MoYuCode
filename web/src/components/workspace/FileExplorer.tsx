@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 import { api } from '@/api/client'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
-import { FileTree, type FsEntryTarget, getParentPath, getBaseName } from './FileTree'
+import { VirtualFileTree, type FsEntryTarget, getParentPath } from './VirtualFileTree'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Search, X, RefreshCw } from 'lucide-react'
@@ -385,9 +385,9 @@ export function FileExplorer({ workspacePath, className }: FileExplorerProps) {
         </div>
       )}
 
-      {/* 文件树 */}
+      {/* 文件树 - 使用虚拟滚动优化性能 */}
       <div className="flex-1 overflow-hidden">
-        <FileTree
+        <VirtualFileTree
           key={refreshKey}
           workspacePath={workspacePath}
           filterKeyword={filterKeyword}

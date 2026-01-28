@@ -43,6 +43,8 @@ import type {
   SkillsIndexDto,
   SkillInstallResponse,
   SkillsInstalledMap,
+  ContentSearchRequest,
+  ContentSearchResponse,
 } from '@/api/types'
 
 const API_BASE =''
@@ -250,6 +252,11 @@ export const api = {
       http<void>(`/api/fs/reveal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
     openTerminal: (path: string) =>
       http<void>(`/api/fs/terminal?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+    search: (body: ContentSearchRequest) =>
+      http<ContentSearchResponse>(`/api/fs/search`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
   git: {
     status: (path: string) =>

@@ -4,21 +4,29 @@ import {
   getIconForOpenFolder,
 } from 'vscode-icons-ts'
 
-const iconUrlByPath = import.meta.glob(
-  '../node_modules/vscode-icons-ts/build/icons/*.svg',
+// 使用 Vite 的 import.meta.glob 导入所有图标
+// 注意：路径是相对于当前文件的
+const iconModules = import.meta.glob<{ default: string }>(
+  '/node_modules/vscode-icons-ts/build/icons/*.svg',
   {
     eager: true,
     query: '?url',
-    import: 'default',
   },
-) as Record<string, string>
+)
 
-const ICON_DIR = '../node_modules/vscode-icons-ts/build/icons/'
+// 构建图标名称到 URL 的映射
+const iconUrlByName: Record<string, string> = {}
+for (const [path, module] of Object.entries(iconModules)) {
+  const fileName = path.split('/').pop()
+  if (fileName) {
+    iconUrlByName[fileName] = module.default
+  }
+}
 
 export function resolveVscodeIconUrl(iconFile: string | null | undefined): string | null {
   const normalized = (iconFile ?? '').trim()
   if (!normalized) return null
-  return iconUrlByPath[`${ICON_DIR}${normalized}`] ?? null
+  return iconUrlByName[normalized] ?? null
 }
 
 export function getVscodeFileIconUrl(fileName: string): string | null {

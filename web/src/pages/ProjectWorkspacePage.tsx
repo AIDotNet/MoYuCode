@@ -18,14 +18,10 @@ import type {
   SessionTokenUsageDto,
 } from '@/api/types'
 import { cn } from '@/lib/utils'
-import { getVscodeFileIconUrl } from '@/lib/vscodeFileIcons'
-import { DiffViewer, type DiffViewMode } from '@/components/DiffViewer'
-import { MonacoCode, type MonacoCodeSelection } from '@/components/MonacoCode'
 import { TokenUsageBar, TokenUsageDailyChart } from '@/components/CodexSessionViz'
-import { TabStrip, type TabStripItemBase } from '@/components/TabStrip'
-import { ProjectFileManager } from '@/components/project-workspace/ProjectFileManager'
 import { SessionAwareProjectChat } from '@/components/project-workspace/SessionAwareProjectChat'
-import { TerminalSession, type TerminalSessionHandle } from '@/components/terminal-kit'
+import { WorkspaceLayout } from '@/components/workspace/WorkspaceLayout'
+import { useWorkspaceStore, type CodeSelectionInfo } from '@/stores/workspaceStore'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import {
@@ -36,14 +32,11 @@ import {
 } from '@/components/animate-ui/primitives/animate/tooltip'
 import {
   ArrowLeft,
-  FileText,
-  Folder,
   PanelRightOpen,
-  Terminal,
-  X,
 } from 'lucide-react'
 import type { CodeSelection } from '@/lib/chatPromptXml'
 import { useInstanceTracking } from '@/hooks/useInstanceTracking'
+
 
 // Generate a unique instance ID for multi-instance isolation
 function generateInstanceId(): string {
@@ -55,86 +48,6 @@ function generateInstanceId(): string {
     // fallback
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 11)}`
-}
-
-type WorkspacePanelId = 'project-summary'
-
-type WorkspaceView =
-  | { kind: 'empty' }
-  | { kind: 'file'; path: string }
-  | { kind: 'diff'; file: string; staged: boolean }
-  | { kind: 'terminal'; id: string }
-  | { kind: 'output' }
-  | { kind: 'panel'; panelId: WorkspacePanelId }
-
-type WorkspaceTab =
-  | { kind: 'file'; path: string }
-  | { kind: 'diff'; file: string; staged: boolean }
-  | { kind: 'terminal'; id: string; cwd: string }
-  | { kind: 'panel'; panelId: WorkspacePanelId }
-
-type FilePreview = {
-  loading: boolean
-  error: string | null
-  content: string
-  truncated: boolean
-  isBinary: boolean
-  draft: string
-  dirty: boolean
-  saving: boolean
-  saveError: string | null
-}
-
-type DiffPreview = {
-  loading: boolean
-  error: string | null
-  diff: string
-  truncated: boolean
-}
-
-function getBaseName(fullPath: string): string {
-  const normalized = fullPath.replace(/[\\/]+$/, '')
-  const lastSeparator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
-  if (lastSeparator < 0) return normalized
-  const base = normalized.slice(lastSeparator + 1)
-  return base || normalized
-}
-
-function isConfigToml(path: string): boolean {
-  return getBaseName(path).toLowerCase() === 'config.toml'
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
-}
-
-function getTabKey(tab: WorkspaceTab): string {
-  switch (tab.kind) {
-    case 'file':
-      return `file:${tab.path}`
-    case 'diff':
-      return `diff:${tab.staged ? 'staged' : 'worktree'}:${tab.file}`
-    case 'terminal':
-      return `terminal:${tab.id}`
-    case 'panel':
-      return `panel:${tab.panelId}`
-  }
-}
-
-function tryGetViewKey(view: WorkspaceView): string | null {
-  switch (view.kind) {
-    case 'file':
-      return `file:${view.path}`
-    case 'diff':
-      return `diff:${view.staged ? 'staged' : 'worktree'}:${view.file}`
-    case 'terminal':
-      return `terminal:${view.id}`
-    case 'panel':
-      return `panel:${view.panelId}`
-    case 'empty':
-    case 'output':
-      return null
-  }
 }
 
 export type ProjectWorkspaceHandle = {
@@ -189,7 +102,6 @@ function formatCompactNumber(value: number): string {
     return fmt.format(value)
   } catch {
     const sign = value < 0 ? '-' : ''
-
     const stripTrailingZero = (raw: string) =>
       raw.endsWith('.0') ? raw.slice(0, -2) : raw
 
@@ -232,6 +144,8 @@ function emptyTokenUsage(): SessionTokenUsageDto {
   }
 }
 
+// ProjectSummaryPanel 组件暂时保留，将在后续版本中集成到 WorkspaceLayout
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
   const workspacePath = project.workspacePath.trim()
 
@@ -289,30 +203,23 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
       { message: 0, functionCall: 0, agentReasoning: 0, tokenCount: 0, other: 0 },
     )
 
-    return {
-      count: data.length,
-      durationMs,
-      tokenTotal,
-      eventTotals,
-    }
+    return { count: data.length, durationMs, tokenTotal, eventTotals }
   }, [sessions])
+
 
   const projectTokenUsage: SessionTokenUsageDto = useMemo(() => {
     const totals = emptyTokenUsage()
-
     for (const s of sessions ?? []) {
       totals.inputTokens += s.tokenUsage?.inputTokens ?? 0
       totals.cachedInputTokens += s.tokenUsage?.cachedInputTokens ?? 0
       totals.outputTokens += s.tokenUsage?.outputTokens ?? 0
       totals.reasoningOutputTokens += s.tokenUsage?.reasoningOutputTokens ?? 0
     }
-
     return totals
   }, [sessions])
 
   const dailyTokenUsage7d: CodexDailyTokenUsageDto[] = useMemo(() => {
     const data = sessions ?? []
-
     const end = new Date()
     end.setHours(0, 0, 0, 0)
     const start = new Date(end)
@@ -362,13 +269,11 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
 
   const gitSummary = useMemo(() => {
     if (!gitStatus) return null
-
     const staged = gitStatus.entries.filter((e) => e.indexStatus !== ' ').length
     const worktree = gitStatus.entries.filter((e) => e.worktreeStatus !== ' ').length
     const untracked = gitStatus.entries.filter(
       (e) => e.indexStatus === '?' && e.worktreeStatus === '?',
     ).length
-
     return {
       branch: gitStatus.branch,
       repoRoot: gitStatus.repoRoot,
@@ -378,6 +283,7 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
       untracked,
     }
   }, [gitStatus])
+
 
   return (
     <div className="h-full min-h-0 overflow-auto p-4">
@@ -405,9 +311,7 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
           <div className="text-sm font-medium">项目信息</div>
           <div className="mt-3 space-y-1 text-sm">
             <div className="break-all">路径：{project.workspacePath}</div>
-            <div>
-              Provider：{project.providerName || project.providerId || '—'}
-            </div>
+            <div>Provider：{project.providerName || project.providerId || '—'}</div>
             <div>Model：{project.model ?? '—'}</div>
             <div>创建：{formatUtc(project.createdAtUtc)}</div>
             <div>更新：{formatUtc(project.updatedAtUtc)}</div>
@@ -437,6 +341,7 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
           )}
         </div>
       </div>
+
 
       <div className="mt-4 rounded-lg border bg-card p-4">
         <div className="text-sm font-medium">Token 汇总</div>
@@ -494,6 +399,7 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
         )}
       </div>
 
+
       <div className="mt-4 rounded-lg border bg-card p-4">
         <div className="text-sm font-medium">Git 状态</div>
         {hasGitRepo === false ? (
@@ -520,6 +426,7 @@ function ProjectSummaryPanel({ project }: { project: ProjectDto }) {
   )
 }
 
+
 export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWorkspacePageProps>(
   function ProjectWorkspacePage({
     projectId,
@@ -533,14 +440,10 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
   const navigate = useNavigate()
 
   // Generate unique instance ID for multi-instance isolation
-  // This ID is stable for the lifetime of this component instance
   const instanceIdRef = useRef<string>(generateInstanceId())
   const instanceId = instanceIdRef.current
 
-  // Support multiple ways to get project ID:
-  // 1. From props (when embedded in CodePage)
-  // 2. From route params (/projects/:id)
-  // 3. From query params (?projects=id or ?project=id)
+  // Support multiple ways to get project ID
   const id =
     projectId ??
     routeId ??
@@ -548,22 +451,19 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     searchParams.get('project') ??
     undefined
 
-  // Task 7.3: Track instance count for multi-instance indicator
+  // Track instance count for multi-instance indicator
   const { projectInstanceCount, hasMultipleProjectInstances } = useInstanceTracking(
     instanceId,
     id
   )
 
-  // Support session ID from props or query params (?session=sessionId)
-  // In standalone mode, read from query params; when embedded, use props
+  // Support session ID from props or query params
   const sessionIdFromQuery = searchParams.get('session')
   const effectiveSessionId = sessionId ?? sessionIdFromQuery ?? null
 
   // Function to update session ID in URL (for standalone mode)
-  // Available for future use when session switching UI is added
   const _updateSessionInUrl = useCallback((newSessionId: string | null) => {
-    if (projectId) return // Don't update URL when embedded
-
+    if (projectId) return
     const newParams = new URLSearchParams(searchParams)
     if (newSessionId) {
       newParams.set('session', newSessionId)
@@ -572,25 +472,16 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     }
     setSearchParams(newParams, { replace: true })
   }, [projectId, searchParams, setSearchParams])
-  void _updateSessionInUrl // Suppress unused warning
+  void _updateSessionInUrl
 
   const [project, setProject] = useState<ProjectDto | null>(null)
   const [, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [projectNotFound, setProjectNotFound] = useState(false)
 
-  const [toolsPanelOpen, setToolsPanelOpen] = useState(true)
-  const [fileManagerOpen, setFileManagerOpen] = useState(true)
-  const [fileManagerWidthPx, setFileManagerWidthPx] = useState(320)
-  const fileManagerWidthInitializedRef = useRef(false)
-
-  const workspaceBodyRef = useRef<HTMLDivElement | null>(null)
-  const resizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
-  const [resizing, setResizing] = useState(false)
-
   // 左右面板独立控制状态
-  const [leftPanelOpen, setLeftPanelOpen] = useState(true) // 左侧聊天面板
-  const [internalRightPanelOpen, setInternalRightPanelOpen] = useState(false) // 右侧工作区面板，默认关闭
+  const [leftPanelOpen, setLeftPanelOpen] = useState(true)
+  const [internalRightPanelOpen, setInternalRightPanelOpen] = useState(false)
 
   // 使用外部状态或内部状态
   const rightPanelOpen = externalRightPanelOpen ?? internalRightPanelOpen
@@ -602,29 +493,25 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     }
   }, [onRightPanelOpenChange])
 
+
   // 左右面板宽度相关状态
-  const [leftPanelWidth, setLeftPanelWidth] = useState(0.5) // 默认 50%
+  const [leftPanelWidth, setLeftPanelWidth] = useState(0.5)
   const [resizingPanels, setResizingPanels] = useState(false)
   const panelsResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const workspaceContainerRef = useRef<HTMLDivElement | null>(null)
 
-  const [tabs, setTabs] = useState<WorkspaceTab[]>([])
-  const [activeView, setActiveView] = useState<WorkspaceView>({ kind: 'empty' })
+  // 代码选择状态（用于聊天集成）
   const [codeSelection, setCodeSelection] = useState<CodeSelection | null>(null)
-  const [filePreviewByPath, setFilePreviewByPath] = useState<Record<string, FilePreview>>({})
-  const [diffPreviewByFile, setDiffPreviewByFile] = useState<Record<string, DiffPreview>>({})
-  const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>('split')
-  const previewInFlightRef = useRef<Set<string>>(new Set())
-  const diffInFlightRef = useRef<Set<string>>(new Set())
 
-  const [detailsPortalTarget, setDetailsPortalTarget] = useState<HTMLDivElement | null>(null)
-  const detailsOpen = activeView.kind === 'output'
+  // 详情面板状态（用于工具输出）
+  const [detailsPortalTarget] = useState<HTMLDivElement | null>(null)
+  const detailsOpen = false // 暂时禁用，后续可以通过 WorkspaceLayout 的输出面板实现
 
-  const terminalSessionsRef = useRef<Record<string, TerminalSessionHandle | null>>({})
-  const [terminalStatusById, setTerminalStatusById] = useState<
-    Record<string, 'connecting' | 'connected' | 'closed' | 'error'>
-  >({})
-  const [terminalErrorById, setTerminalErrorById] = useState<Record<string, string | null>>({})
+  // 从 workspaceStore 获取 openFile 方法
+  const openFileInWorkspace = useWorkspaceStore((state) => state.openFile)
+  const createTerminal = useWorkspaceStore((state) => state.createTerminal)
+  const setPanelVisible = useWorkspaceStore((state) => state.setPanelVisible)
+  const setActivePanelTab = useWorkspaceStore((state) => state.setActivePanelTab)
 
   const load = useCallback(async () => {
     if (!id) {
@@ -645,7 +532,6 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
       const errorMessage = (e as Error).message
       setError(errorMessage)
       
-      // Check if it's a 404 error (project not found)
       if (errorMessage.includes('404') || errorMessage.includes('not found') || errorMessage.includes('Not Found')) {
         setProjectNotFound(true)
         console.error(`Project not found: ${id}`, e)
@@ -661,40 +547,29 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     void load()
   }, [load])
 
+
   // Handle invalid/missing project IDs - redirect to appropriate list page
-  // Requirement 4.6 & 9.2: Redirect to last visited list page with error message
   useEffect(() => {
     if (projectNotFound && !projectId) {
-      // Only redirect if we're in standalone mode (not embedded in CodePage)
-      // Determine the appropriate list page based on project type or last visited
       const lastVisitedMode = localStorage.getItem('lastVisitedMode') || 'code'
       const redirectPath = lastVisitedMode === 'claude' ? '/claude' : '/code'
       
       console.warn(`Project not found (ID: ${id}), redirecting to ${redirectPath}`)
-      
-      // Store error message for the list page to display
       sessionStorage.setItem('projectError', `项目未找到 (ID: ${id})`)
-      
-      // Redirect to the list page
       navigate(redirectPath, { replace: true })
     }
   }, [projectNotFound, projectId, id, navigate])
 
-  // Task 1.3: Page title management for multi-instance support
-  // Requirement 3.8 & 10.9: Update document.title to show project name for easy tab identification
+  // Page title management for multi-instance support
   useEffect(() => {
-    // Store the original title to restore later
     const originalTitle = document.title
 
     if (project?.name) {
-      // Format: {projectName} - MoYuCode
       document.title = `${project.name} - MoYuCode`
     } else if (error || projectNotFound) {
-      // Clear title on error
       document.title = 'MoYuCode'
     }
 
-    // Cleanup: restore original title when component unmounts or project changes
     return () => {
       document.title = originalTitle
     }
@@ -702,428 +577,56 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
 
   const workspacePath = (project?.workspacePath ?? '').trim()
 
+  // Resource cleanup on component unmount
   useEffect(() => {
-    setTabs([])
-    setActiveView({ kind: 'empty' })
-    setCodeSelection(null)
-    setFilePreviewByPath({})
-    setDiffPreviewByFile({})
-    terminalSessionsRef.current = {}
-    setTerminalStatusById({})
-    setTerminalErrorById({})
-  }, [workspacePath])
-
-  // Task 4.2: Resource cleanup on component unmount (tab close)
-  // This ensures proper cleanup of terminal sessions, file previews, and other resources
-  useEffect(() => {
-    // Track this instance for debugging multi-instance scenarios
     if (import.meta.env.DEV) {
       console.debug(`[ProjectWorkspace] Instance ${instanceId} mounted for project ${id}`)
     }
 
-    // Cleanup function runs when component unmounts (tab closes, navigation away, etc.)
     return () => {
       if (import.meta.env.DEV) {
         console.debug(`[ProjectWorkspace] Instance ${instanceId} unmounting, cleaning up resources`)
       }
-
-      // Close all terminal sessions
-      const terminals = terminalSessionsRef.current
-      for (const terminalId of Object.keys(terminals)) {
-        const handle = terminals[terminalId]
-        if (handle) {
-          try {
-            handle.terminate()
-          } catch {
-            // Ignore errors during cleanup
-          }
-        }
-      }
-      terminalSessionsRef.current = {}
-
-      // Clear in-flight requests
-      previewInFlightRef.current.clear()
-      diffInFlightRef.current.clear()
     }
   }, [instanceId, id])
 
-  // Task 4.2: Handle browser tab close / page unload
-  // This provides additional cleanup when the user closes the browser tab
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      // Close terminal sessions on tab close
-      const terminals = terminalSessionsRef.current
-      for (const terminalId of Object.keys(terminals)) {
-        const handle = terminals[terminalId]
-        if (handle) {
-          try {
-            handle.terminate()
-          } catch {
-            // Ignore errors during cleanup
-          }
-        }
-      }
-    }
-
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeView.kind !== 'file') {
-      setCodeSelection(null)
-      return
-    }
-
-    setCodeSelection((prev) => (prev?.filePath === activeView.path ? prev : null))
-  }, [activeView])
-
-  useEffect(() => {
-    if (!toolsPanelOpen) return
-    if (!fileManagerOpen) return
-    if (fileManagerWidthInitializedRef.current) return
-    const container = workspaceBodyRef.current
-    if (!container) return
-    const width = container.clientWidth
-    if (!width) return
-
-    const min = 240
-    const max = Math.max(min, Math.floor(width * 0.6))
-    setFileManagerWidthPx(clamp(Math.round(width / 3), min, max))
-    fileManagerWidthInitializedRef.current = true
-  }, [fileManagerOpen, toolsPanelOpen])
-
-  const fetchPreview = useCallback(async (path: string) => {
-    if (previewInFlightRef.current.has(path)) return
-    previewInFlightRef.current.add(path)
-
-    setFilePreviewByPath((prev) => {
-      const existing = prev[path]
-      const content = existing?.content ?? ''
-      return {
-        ...prev,
-        [path]: {
-          loading: true,
-          error: null,
-          content,
-          truncated: existing?.truncated ?? false,
-          isBinary: existing?.isBinary ?? false,
-          draft: existing?.draft ?? content,
-          dirty: existing?.dirty ?? false,
-          saving: existing?.saving ?? false,
-          saveError: existing?.saveError ?? null,
-        },
-      }
-    })
-
-    try {
-      const data = await api.fs.readFile(path)
-      setFilePreviewByPath((prev) => ({
-        ...prev,
-        [path]: {
-          loading: false,
-          error: null,
-          content: data.content,
-          truncated: data.truncated,
-          isBinary: data.isBinary,
-          draft: data.content,
-          dirty: false,
-          saving: false,
-          saveError: null,
-        },
-      }))
-    } catch (e) {
-      setFilePreviewByPath((prev) => {
-        const existing = prev[path]
-        const content = existing?.content ?? ''
-        return {
-          ...prev,
-          [path]: {
-            loading: false,
-            error: (e as Error).message,
-            content,
-            truncated: existing?.truncated ?? false,
-            isBinary: existing?.isBinary ?? false,
-            draft: existing?.draft ?? content,
-            dirty: existing?.dirty ?? false,
-            saving: existing?.saving ?? false,
-            saveError: existing?.saveError ?? null,
-          },
-        }
-      })
-    } finally {
-      previewInFlightRef.current.delete(path)
-    }
-  }, [])
-
-  const fetchDiff = useCallback(
-    async (file: string, staged: boolean) => {
-      const path = workspacePath.trim()
-      if (!path) return
-
-      const key = getTabKey({ kind: 'diff', file, staged })
-
-      if (diffInFlightRef.current.has(key)) return
-      diffInFlightRef.current.add(key)
-
-      setDiffPreviewByFile((prev) => ({
-        ...prev,
-        [key]: {
-          loading: true,
-          error: null,
-          diff: prev[key]?.diff ?? '',
-          truncated: prev[key]?.truncated ?? false,
-        },
-      }))
-
-      try {
-        const data = await api.git.diff(path, file, { staged })
-        setDiffPreviewByFile((prev) => ({
-          ...prev,
-          [key]: {
-            loading: false,
-            error: null,
-            diff: data.diff,
-            truncated: data.truncated,
-          },
-        }))
-      } catch (e) {
-        setDiffPreviewByFile((prev) => ({
-          ...prev,
-          [key]: {
-            loading: false,
-            error: (e as Error).message,
-            diff: prev[key]?.diff ?? '',
-            truncated: prev[key]?.truncated ?? false,
-          },
-        }))
-      } finally {
-        diffInFlightRef.current.delete(key)
-      }
-    },
-    [workspacePath],
-  )
-
+  // 确保右侧面板打开
   const ensureRightPanelOpen = useCallback(() => {
     if (!rightPanelOpen) {
       handleRightPanelOpenChange(true)
     }
   }, [rightPanelOpen, handleRightPanelOpenChange])
 
+
+  // 打开文件（通过新的 WorkspaceLayout）
   const openFile = useCallback(
     (path: string) => {
       const normalized = path.trim()
       if (!normalized) return
       ensureRightPanelOpen()
-      setToolsPanelOpen(true)
-
-      setTabs((prev) => {
-        const exists = prev.some((t) => t.kind === 'file' && t.path === normalized)
-        if (exists) return prev
-        return [...prev, { kind: 'file', path: normalized }]
-      })
-
-      setActiveView({ kind: 'file', path: normalized })
-
-      const existing = filePreviewByPath[normalized]
-      if (!existing) {
-        void fetchPreview(normalized)
-      }
+      openFileInWorkspace(normalized)
     },
-    [ensureRightPanelOpen, fetchPreview, filePreviewByPath],
+    [ensureRightPanelOpen, openFileInWorkspace],
   )
 
-  const openDiff = useCallback(
-    (file: string, opts?: { staged?: boolean }) => {
-      const normalized = file.trim()
-      if (!normalized) return
-      ensureRightPanelOpen()
-      setToolsPanelOpen(true)
-
-      const staged = Boolean(opts?.staged)
-      const tab: WorkspaceTab = { kind: 'diff', file: normalized, staged }
-      const key = getTabKey(tab)
-
-      setTabs((prev) => {
-        const exists = prev.some((t) => t.kind === 'diff' && t.file === normalized && t.staged === staged)
-        if (exists) return prev
-        return [...prev, tab]
-      })
-
-      setActiveView({ kind: 'diff', file: normalized, staged })
-
-      const existing = diffPreviewByFile[key]
-      if (!existing) {
-        void fetchDiff(normalized, staged)
-      }
-    },
-    [diffPreviewByFile, ensureRightPanelOpen, fetchDiff],
-  )
-
+  // 打开项目汇总（使用 ProjectSummaryPanel）
   const openProjectSummary = useCallback(() => {
     ensureRightPanelOpen()
-    setToolsPanelOpen(true)
-    setTabs((prev) => {
-      const exists = prev.some((t) => t.kind === 'panel' && t.panelId === 'project-summary')
-      if (exists) return prev
-      return [...prev, { kind: 'panel', panelId: 'project-summary' }]
-    })
-    setActiveView({ kind: 'panel', panelId: 'project-summary' })
+    // TODO: 实现项目汇总面板，使用 ProjectSummaryPanel 组件
+    // 目前 WorkspaceLayout 不支持自定义面板，需要后续扩展
   }, [ensureRightPanelOpen])
 
-  const updateFileDraft = useCallback((path: string, draft: string) => {
-    setFilePreviewByPath((prev) => {
-      const existing = prev[path]
-      if (!existing) return prev
-      if (existing.isBinary || existing.truncated) return prev
-
-      const nextDirty = draft !== existing.content
-      return {
-        ...prev,
-        [path]: {
-          ...existing,
-          draft,
-          dirty: nextDirty,
-          saveError: null,
-        },
-      }
-    })
-  }, [])
-
-  const revertFileDraft = useCallback((path: string) => {
-    setFilePreviewByPath((prev) => {
-      const existing = prev[path]
-      if (!existing) return prev
-      return {
-        ...prev,
-        [path]: {
-          ...existing,
-          draft: existing.content,
-          dirty: false,
-          saveError: null,
-        },
-      }
-    })
-  }, [])
-
-  const saveFileDraft = useCallback(
-    async (path: string) => {
-      const preview = filePreviewByPath[path]
-      if (!preview) return
-      if (!isConfigToml(path)) return
-      if (preview.saving) return
-      if (preview.isBinary || preview.truncated) return
-      if (!preview.dirty) return
-
-      const content = preview.draft ?? ''
-
-      setFilePreviewByPath((prev) => {
-        const existing = prev[path]
-        if (!existing) return prev
-        return {
-          ...prev,
-          [path]: {
-            ...existing,
-            saving: true,
-            saveError: null,
-          },
-        }
-      })
-
-      try {
-        await api.fs.writeFile({ path, content })
-        setFilePreviewByPath((prev) => {
-          const existing = prev[path]
-          if (!existing) return prev
-          return {
-            ...prev,
-            [path]: {
-              ...existing,
-              content,
-              draft: content,
-              dirty: false,
-              saving: false,
-              saveError: null,
-            },
-          }
-        })
-      } catch (e) {
-        setFilePreviewByPath((prev) => {
-          const existing = prev[path]
-          if (!existing) return prev
-          return {
-            ...prev,
-            [path]: {
-              ...existing,
-              saving: false,
-              saveError: (e as Error).message,
-            },
-          }
-        })
-      }
-    },
-    [filePreviewByPath],
-  )
-
-  const openExternalTerminal = useCallback(async (path: string) => {
-    const normalized = path.trim()
-    if (!normalized) return
-    try {
-      await api.fs.openTerminal(normalized)
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }, [])
-
-  const createTerminalId = useCallback((): string => {
-    const cryptoObj = globalThis.crypto as Crypto | undefined
-    try {
-      if (cryptoObj?.randomUUID) return cryptoObj.randomUUID()
-    } catch {
-      // ignore
-    }
-
-    // Fallback: RFC4122 v4 UUID from random bytes, so the mux header stays fixed-length.
-    const bytes = new Uint8Array(16)
-    try {
-      cryptoObj?.getRandomValues?.(bytes)
-    } catch {
-      for (let i = 0; i < bytes.length; i += 1) {
-        bytes[i] = Math.floor(Math.random() * 256)
-      }
-    }
-
-    // Set version (4) and variant (RFC4122).
-    bytes[6] = (bytes[6] & 0x0f) | 0x40
-    bytes[8] = (bytes[8] & 0x3f) | 0x80
-
-    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-  }, [])
-
+  // 打开终端
   const openTerminal = useCallback(
     (opts?: { path?: string; focus?: boolean }) => {
       const cwd = (opts?.path ?? workspacePath).trim()
       if (!cwd) return
       ensureRightPanelOpen()
-
-      const id = createTerminalId()
-      const tab: WorkspaceTab = { kind: 'terminal', id, cwd }
-
-      setToolsPanelOpen(true)
-      setTabs((prev) => [...prev, tab])
-      setActiveView({ kind: 'terminal', id })
-
-      setTerminalStatusById((prev) => ({ ...prev, [id]: 'connecting' }))
-      setTerminalErrorById((prev) => ({ ...prev, [id]: null }))
-
-      if (opts?.focus) {
-        window.setTimeout(() => terminalSessionsRef.current[id]?.focus(), 0)
-      }
+      createTerminal(cwd)
+      setPanelVisible(true)
+      setActivePanelTab('terminal')
     },
-    [createTerminalId, ensureRightPanelOpen, workspacePath],
+    [createTerminal, ensureRightPanelOpen, setActivePanelTab, setPanelVisible, workspacePath],
   )
 
   useImperativeHandle(
@@ -1138,108 +641,16 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     [openFile, openProjectSummary, openTerminal, rightPanelOpen, handleRightPanelOpenChange],
   )
 
-  const closeTab = useCallback(
-    (tab: WorkspaceTab) => {
-      const key = getTabKey(tab)
-
-      setTabs((prev) => {
-        const next = prev.filter((t) => getTabKey(t) !== key)
-
-        setActiveView((view) => {
-          const isActive =
-            (tab.kind === 'file' && view.kind === 'file' && view.path === tab.path) ||
-            (tab.kind === 'diff' &&
-              view.kind === 'diff' &&
-              view.file === tab.file &&
-              view.staged === tab.staged) ||
-            (tab.kind === 'terminal' && view.kind === 'terminal' && view.id === tab.id) ||
-            (tab.kind === 'panel' && view.kind === 'panel' && view.panelId === tab.panelId)
-          if (!isActive) return view
-
-          const last = next[next.length - 1]
-          if (!last) return { kind: 'empty' }
-          switch (last.kind) {
-            case 'file':
-              return { kind: 'file', path: last.path }
-            case 'diff':
-              return { kind: 'diff', file: last.file, staged: last.staged }
-            case 'terminal':
-              return { kind: 'terminal', id: last.id }
-            case 'panel':
-              return { kind: 'panel', panelId: last.panelId }
-          }
-        })
-
-        return next
-      })
-
-      if (tab.kind === 'file') {
-        setFilePreviewByPath((prev) => {
-          const next = { ...prev }
-          delete next[tab.path]
-          return next
-        })
-      } else if (tab.kind === 'diff') {
-        setDiffPreviewByFile((prev) => {
-          const key = getTabKey(tab)
-          const next = { ...prev }
-          delete next[key]
-          return next
-        })
-      } else if (tab.kind === 'terminal') {
-        terminalSessionsRef.current[tab.id] = null
-        setTerminalStatusById((prev) => {
-          const next = { ...prev }
-          delete next[tab.id]
-          return next
-        })
-        setTerminalErrorById((prev) => {
-          const next = { ...prev }
-          delete next[tab.id]
-          return next
-        })
-      }
-    },
-    [],
-  )
-
-  const startResize = useCallback(
-    (e: PointerEvent<HTMLDivElement>) => {
-      if (!fileManagerOpen) return
-      const container = workspaceBodyRef.current
-      if (!container) return
-
-      resizeStateRef.current = { startX: e.clientX, startWidth: fileManagerWidthPx }
-      setResizing(true)
-      e.currentTarget.setPointerCapture(e.pointerId)
-    },
-    [fileManagerOpen, fileManagerWidthPx],
-  )
-
-  const moveResize = useCallback(
-    (e: PointerEvent<HTMLDivElement>) => {
-      if (!resizing) return
-      const state = resizeStateRef.current
-      const container = workspaceBodyRef.current
-      if (!state || !container) return
-
-      const width = container.clientWidth
-      if (!width) return
-
-      const delta = e.clientX - state.startX
-      const min = 240
-      const minRight = 360
-      const max = Math.max(min, width - minRight)
-      const next = clamp(state.startWidth + delta, min, max)
-      setFileManagerWidthPx(next)
-    },
-    [resizing],
-  )
-
-  const stopResize = useCallback(() => {
-    resizeStateRef.current = null
-    setResizing(false)
+  // 处理代码选择发送到聊天
+  const handleCodeSelectionToChat = useCallback((selection: CodeSelectionInfo) => {
+    setCodeSelection({
+      filePath: selection.filePath,
+      startLine: selection.startLine,
+      endLine: selection.endLine,
+      text: selection.text,
+    })
   }, [])
+
 
   // 左右面板拖拽调整宽度
   const startPanelsResize = useCallback((e: PointerEvent<HTMLDivElement>) => {
@@ -1262,12 +673,10 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     const rect = container.getBoundingClientRect()
     const delta = e.clientX - state.startX
     const newLeftWidth = state.startWidth + delta
-    const minLeftWidth = 300 // 最小左侧宽度
-    const minRightWidth = 360 // 最小右侧宽度
+    const minLeftWidth = 300
+    const minRightWidth = 360
 
-    // 计算新的百分比
     let newPercentage = newLeftWidth / rect.width
-    // 限制最小值
     const maxPercentage = 1 - (minRightWidth / rect.width)
     const minPercentage = minLeftWidth / rect.width
     newPercentage = Math.max(minPercentage, Math.min(maxPercentage, newPercentage))
@@ -1280,455 +689,7 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
     setResizingPanels(false)
   }, [])
 
-  type WorkspaceMainTab = WorkspaceTab & TabStripItemBase
-
-  const mainTabs = useMemo<WorkspaceMainTab[]>(() => {
-    return tabs.map((tab) => {
-      if (tab.kind === 'file') {
-        const dirty = Boolean(filePreviewByPath[tab.path]?.dirty)
-        const base = getBaseName(tab.path)
-        return {
-          ...tab,
-          key: getTabKey(tab),
-          label: base,
-          title: tab.path,
-          dirty,
-          iconUrl: getVscodeFileIconUrl(base),
-        }
-      }
-
-      if (tab.kind === 'diff') {
-        const base = getBaseName(tab.file)
-        return {
-          ...tab,
-          key: getTabKey(tab),
-          label: tab.staged ? `Diff (staged): ${base}` : `Diff: ${base}`,
-          title: tab.file,
-          iconUrl: getVscodeFileIconUrl(base),
-        }
-      }
-
-      if (tab.kind === 'terminal') {
-        const base = getBaseName(tab.cwd)
-        return {
-          ...tab,
-          key: getTabKey(tab),
-          label: base ? `Terminal: ${base}` : 'Terminal',
-          title: tab.cwd,
-          icon: <Terminal className="size-4" />,
-        }
-      }
-
-      return {
-        ...tab,
-        key: getTabKey(tab),
-        label: tab.panelId === 'project-summary' ? '汇总' : tab.panelId,
-        title: tab.panelId === 'project-summary' ? '项目数据汇总' : tab.panelId,
-        icon: <Folder className="size-4" />,
-      }
-    })
-  }, [filePreviewByPath, tabs])
-
-  const renderMain = () => {
-    const terminalTabs = tabs.filter(
-      (t): t is Extract<WorkspaceTab, { kind: 'terminal' }> => t.kind === 'terminal',
-    )
-    const isTerminalView = activeView.kind === 'terminal'
-    const activeTerminalId = isTerminalView ? activeView.id : ''
-    const activeTab = terminalTabs.find((t) => t.id === activeTerminalId) ?? null
-    const cwd = activeTab ? activeTab.cwd.trim() || workspacePath : workspacePath
-    const terminalStatus = terminalStatusById[activeTerminalId] ?? 'closed'
-    const terminalStatusError = terminalErrorById[activeTerminalId] ?? null
-    const statusLabel =
-      terminalStatus === 'connected'
-        ? '已连接'
-        : terminalStatus === 'connecting'
-          ? '连接中…'
-          : terminalStatus === 'error'
-            ? '连接错误'
-            : '未连接'
-
-    const terminalPanel = (
-      <div
-        className={cn(
-          'h-full min-h-0 overflow-hidden flex flex-col',
-          isTerminalView ? '' : 'hidden',
-        )}
-      >
-        <div className="shrink-0 border-b px-3 py-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <div className="text-sm font-medium">Terminal</div>
-                <div className="text-[11px] text-muted-foreground">{statusLabel}</div>
-              </div>
-              <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={cwd}>
-                {cwd || '（未设置工作目录）'}
-              </div>
-              {terminalStatusError ? (
-                <div className="mt-1 text-xs text-destructive">{terminalStatusError}</div>
-              ) : null}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!cwd}
-                onClick={() => terminalSessionsRef.current[activeTerminalId]?.restart()}
-              >
-                重启
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!activeTab}
-                onClick={() => {
-                  terminalSessionsRef.current[activeTerminalId]?.terminate()
-                  if (activeTab) closeTab(activeTab)
-                }}
-              >
-                结束
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => terminalSessionsRef.current[activeTerminalId]?.clear()}
-              >
-                清屏
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!cwd}
-                onClick={() => void openExternalTerminal(cwd)}
-              >
-                外部终端
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-hidden bg-black relative">
-          {terminalTabs.map((t) => {
-            const tabCwd = t.cwd.trim() || workspacePath
-            const active = t.id === activeTerminalId
-            return (
-              <TerminalSession
-                key={t.id}
-                ref={(handle) => {
-                  terminalSessionsRef.current[t.id] = handle
-                }}
-                id={t.id}
-                cwd={tabCwd}
-                ariaLabel="Project terminal"
-                options={{ cursorBlink: true }}
-                autoFocus={active}
-                className={cn('absolute inset-0', active ? '' : 'hidden')}
-                onStatusChange={(status, err) => {
-                  setTerminalStatusById((prev) => ({ ...prev, [t.id]: status }))
-                  setTerminalErrorById((prev) => ({ ...prev, [t.id]: err ?? null }))
-                }}
-              />
-            )
-          })}
-        </div>
-      </div>
-    )
-
-    if (activeView.kind === 'panel') {
-      if (activeView.panelId === 'project-summary') {
-        if (!project) {
-          return (
-            <>
-              {terminalPanel}
-              <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
-                <span className="inline-flex items-center gap-2">
-                  <Spinner /> 加载中…
-                </span>
-              </div>
-            </>
-          )
-        }
-        return (
-          <>
-            {terminalPanel}
-            <ProjectSummaryPanel project={project} />
-          </>
-        )
-      }
-
-      return (
-        <>
-          {terminalPanel}
-          <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
-            未知面板：{activeView.panelId}
-          </div>
-        </>
-      )
-    }
-
-    if (activeView.kind === 'terminal') {
-      return <>{terminalPanel}</>
-    }
-
-    if (activeView.kind === 'output') {
-      return (
-        <>
-          {terminalPanel}
-          <div ref={setDetailsPortalTarget} className="h-full min-h-0 overflow-hidden" />
-        </>
-      )
-    }
-
-    if (activeView.kind === 'diff') {
-      const key = getTabKey({ kind: 'diff', file: activeView.file, staged: activeView.staged })
-      const preview = diffPreviewByFile[key]
-      if (!preview || preview.loading) {
-        return (
-          <>
-            {terminalPanel}
-            <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
-              <span className="inline-flex items-center gap-2">
-                <Spinner /> 加载中…
-              </span>
-            </div>
-          </>
-        )
-      }
-
-      if (preview.error) {
-        return (
-          <>
-            {terminalPanel}
-            <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-destructive">
-              {preview.error}
-            </div>
-          </>
-        )
-      }
-
-      return (
-        <>
-          {terminalPanel}
-          <div className="h-full min-h-0 overflow-hidden flex flex-col">
-            <div className="shrink-0 border-b px-3 py-2">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{getBaseName(activeView.file)}</div>
-                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={activeView.file}>
-                    {activeView.staged ? 'Staged Changes' : 'Changes'}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant={diffViewMode === 'split' ? 'secondary' : 'outline'}
-                    size="sm"
-                    onClick={() => setDiffViewMode('split')}
-                  >
-                    Split
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={diffViewMode === 'unified' ? 'secondary' : 'outline'}
-                    size="sm"
-                    onClick={() => setDiffViewMode('unified')}
-                  >
-                    Unified
-                  </Button>
-                </div>
-              </div>
-
-              {preview.truncated ? (
-                <div className="mt-2 text-xs text-muted-foreground">Diff 已截断（仅展示前一部分）。</div>
-              ) : null}
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <DiffViewer diff={preview.diff} viewMode={diffViewMode} className="h-full" />
-            </div>
-          </div>
-        </>
-      )
-    }
-
-    if (activeView.kind === 'file') {
-      const preview = filePreviewByPath[activeView.path]
-      if (!preview || preview.loading) {
-        return (
-          <>
-            {terminalPanel}
-            <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
-              <span className="inline-flex items-center gap-2">
-                <Spinner /> 加载中…
-              </span>
-            </div>
-          </>
-        )
-      }
-
-      if (preview.error) {
-        return (
-          <>
-            {terminalPanel}
-            <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-destructive">
-              {preview.error}
-            </div>
-          </>
-        )
-      }
-
-      if (preview.isBinary) {
-        return (
-          <>
-            {terminalPanel}
-            <div className="h-full min-h-0 overflow-auto px-4 py-6 text-sm text-muted-foreground">
-              该文件可能是二进制文件，暂不支持预览。
-            </div>
-          </>
-        )
-      }
-
-      const canEdit = isConfigToml(activeView.path) && !preview.truncated
-      const dirty = Boolean(preview.dirty)
-
-      return (
-        <>
-          {terminalPanel}
-          <div className="h-full min-h-0 overflow-hidden flex flex-col">
-            {preview.truncated ? (
-              <div className="border-b bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
-                内容已截断（仅展示前一部分）。
-              </div>
-            ) : null}
-            {canEdit ? (
-              <div className="shrink-0 border-b px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">
-                      {getBaseName(activeView.path)}
-                      {dirty ? '（未保存）' : ''}
-                    </div>
-                    <div
-                      className="mt-0.5 truncate text-[11px] text-muted-foreground"
-                      title={activeView.path}
-                    >
-                      {activeView.path}
-                    </div>
-                    {preview.saveError ? (
-                      <div className="mt-1 text-xs text-destructive">{preview.saveError}</div>
-                    ) : null}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={!dirty || preview.saving}
-                      onClick={() => void saveFileDraft(activeView.path)}
-                    >
-                      保存
-                      {preview.saving ? <Spinner /> : null}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={!dirty || preview.saving}
-                      onClick={() => revertFileDraft(activeView.path)}
-                    >
-                      还原
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-            <div className="min-h-0 flex-1 overflow-hidden">
-              {canEdit ? (
-                <MonacoCode
-                  code={preview.draft}
-                  filePath={activeView.path}
-                  className="h-full"
-                  readOnly={false}
-                  onChange={(value) => updateFileDraft(activeView.path, value)}
-                  onSelectionChange={(selection: MonacoCodeSelection | null) => {
-                    if (!selection) {
-                      setCodeSelection(null)
-                      return
-                    }
-
-                    setCodeSelection({
-                      filePath: activeView.path,
-                      startLine: selection.startLine,
-                      endLine: selection.endLine,
-                      text: selection.text,
-                    })
-                  }}
-                />
-              ) : preview.content ? (
-                <MonacoCode
-                  code={preview.content}
-                  filePath={activeView.path}
-                  className="h-full"
-                  onSelectionChange={(selection: MonacoCodeSelection | null) => {
-                    if (!selection) {
-                      setCodeSelection(null)
-                      return
-                    }
-
-                    setCodeSelection({
-                      filePath: activeView.path,
-                      startLine: selection.startLine,
-                      endLine: selection.endLine,
-                      text: selection.text,
-                    })
-                  }}
-                />
-              ) : (
-                <div className="px-4 py-4 text-xs text-muted-foreground">（空文件）</div>
-              )}
-            </div>
-          </div>
-        </>
-      )
-    }
-
-    return (
-      <>
-        {terminalPanel}
-        <div className="flex h-full min-h-0 items-center justify-center text-center">
-          <div className="max-w-sm">
-            <div className="text-sm font-medium">No tabs open</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              预览一个文件，或打开终端开始工作。
-            </div>
-            <div className="mt-4 flex items-center justify-center gap-2">
-              <Button type="button" variant="outline" onClick={() => openTerminal({ focus: true })}>
-                打开终端
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setActiveView({ kind: 'output' })}
-              >
-                工具输出
-              </Button>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
-
-  // Determine if we're in standalone mode (accessed via /projects/:id route)
-  // In standalone mode, show back navigation to return to project list
+  // Determine if we're in standalone mode
   const isStandaloneMode = !projectId && routeId
 
   // Determine the correct list page based on project.toolType
@@ -1741,558 +702,183 @@ export const ProjectWorkspacePage = forwardRef<ProjectWorkspaceHandle, ProjectWo
 
   const handleBackToList = useCallback(() => {
     const listPath = getListPagePath()
-    // Store the last visited mode for future redirects
     localStorage.setItem('lastVisitedMode', project?.toolType === 'ClaudeCode' ? 'claude' : 'code')
     navigate(listPath)
   }, [getListPagePath, navigate, project?.toolType])
 
-      return (
 
-        <div className="h-full w-full overflow-hidden flex flex-col bg-background font-sans selection:bg-primary/10">
+  return (
+    <div className="h-full w-full overflow-hidden flex flex-col bg-background font-sans selection:bg-primary/10">
+      {/* ChatGPT-style Global Header */}
+      {isStandaloneMode && project && (
+        <header className="shrink-0 h-14 flex items-center justify-between px-4 z-30 bg-background/80 backdrop-blur-md">
+          <div className="flex items-center gap-3">
+            {/* Back to Home/List */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              onClick={handleBackToList}
+              title="返回项目列表"
+            >
+              <ArrowLeft className="size-5" />
+            </Button>
 
-          {/* ChatGPT-style Global Header */}
-
-        {isStandaloneMode && project && (
-
-          <header className="shrink-0 h-14 flex items-center justify-between px-4 z-30 bg-background/80 backdrop-blur-md">
-
-            <div className="flex items-center gap-3">
-
-              {/* Back to Home/List */}
-
-              <Button
-
-                type="button"
-
-                variant="ghost"
-
-                size="icon-sm"
-
-                className="text-muted-foreground hover:text-foreground transition-colors"
-
-                onClick={handleBackToList}
-
-                title="返回项目列表"
-
-              >
-
-                <ArrowLeft className="size-5" />
-
-              </Button>
-
-  
-
-              {/* Selector-like Title */}
-
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-muted/50 transition-all cursor-default group">
-
-                <span className="text-base font-semibold text-foreground/90 tracking-tight">{project.name}</span>
-
-                <div className={cn(
-
-                  "flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-widest",
-
-                  project.toolType === 'ClaudeCode' 
-
-                    ? "bg-orange-500/10 text-orange-600 dark:text-orange-400" 
-
-                    : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-
-                )}>
-
-                  {project.toolType === 'ClaudeCode' ? 'Claude' : 'Codex'}
-
-                </div>
-
-                
-
-                {hasMultipleProjectInstances && (
-
-                  <div className="size-5 flex items-center justify-center rounded-full bg-blue-500/10 text-blue-600 text-[10px] font-black">
-
-                    {projectInstanceCount}
-
-                  </div>
-
-                )}
-
+            {/* Selector-like Title */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-muted/50 transition-all cursor-default group">
+              <span className="text-base font-semibold text-foreground/90 tracking-tight">{project.name}</span>
+              <div className={cn(
+                "flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-widest",
+                project.toolType === 'ClaudeCode' 
+                  ? "bg-orange-500/10 text-orange-600 dark:text-orange-400" 
+                  : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              )}>
+                {project.toolType === 'ClaudeCode' ? 'Claude' : 'Codex'}
               </div>
-
-            </div>
-
-  
-
-            <div className="flex items-center gap-2">
-
-              {/* Workspace Toggle (Canvas) */}
-
-              <TooltipProvider>
-
-                <Tooltip>
-
-                  <TooltipTrigger asChild>
-
-                    <Button
-
-                      type="button"
-
-                      variant="ghost"
-
-                      size="sm"
-
-                      className={cn(
-
-                        "h-9 px-3 gap-2 rounded-xl transition-all",
-
-                        rightPanelOpen ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
-
-                      )}
-
-                      onClick={() => handleRightPanelOpenChange(!rightPanelOpen)}
-
-                    >
-
-                      <PanelRightOpen className={cn(
-
-                        "size-4 transition-transform duration-500",
-
-                        !rightPanelOpen && "rotate-180"
-
-                      )} />
-
-                      <span className="text-xs font-semibold">工作区</span>
-
-                    </Button>
-
-                  </TooltipTrigger>
-
-                  <TooltipContent className="text-xs">
-
-                    {rightPanelOpen ? '收起工作区' : '打开工作区'}
-
-                  </TooltipContent>
-
-                </Tooltip>
-
-              </TooltipProvider>
-
-            </div>
-
-          </header>
-
-        )}
-
-  
-
-        {error && !projectNotFound ? (
-
-          <div className="shrink-0 p-4">
-
-            <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 flex items-center justify-between gap-4">
-
-              <div className="text-sm text-destructive font-medium">{error}</div>
-
-              <Button variant="outline" size="sm" className="rounded-lg" onClick={() => void load()}>重试</Button>
-
-            </div>
-
-          </div>
-
-        ) : null}
-
-        
-
-        {!id && !projectId ? (
-
-          <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm font-medium">
-
-            未选择项目
-
-          </div>
-
-        ) : null}
-
-        
-
-        {id && projectNotFound && projectId ? (
-
-          <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8">
-
-            <div className="text-muted-foreground font-medium">项目未找到 (ID: {id})</div>
-
-            <Button variant="outline" className="rounded-xl px-6" onClick={() => void load()}>重试</Button>
-
-          </div>
-
-        ) : null}
-
-        
-
-        {/* Main Workspace Area */}
-
-        <div
-
-          ref={workspaceContainerRef}
-
-          className="flex-1 min-h-0 flex relative overflow-hidden"
-
-        >
-
-          {/* Left Side: Chat Interface */}
-
-          {leftPanelOpen && project && (
-
-            <>
-
-              <section
-
-                className={cn(
-
-                  'h-full flex flex-col transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]',
-
-                  rightPanelOpen ? 'shrink-0' : 'flex-1',
-
-                )}
-
-                style={rightPanelOpen ? { width: `${leftPanelWidth * 100}%` } : undefined}
-
-              >
-
-                <div className="h-full relative overflow-hidden">
-
-                  <SessionAwareProjectChat
-
-                    key={effectiveSessionId ?? 'new'}
-
-                    project={project}
-
-                    detailsOpen={detailsOpen}
-
-                    detailsPortalTarget={detailsPortalTarget}
-
-                    activeFilePath={activeView.kind === 'file' ? activeView.path : null}
-
-                    codeSelection={codeSelection}
-
-                    onClearCodeSelection={() => setCodeSelection(null)}
-
-                    currentToolType={currentToolType}
-
-                    showSessionPanel={true}
-
-                  />
-
+              
+              {hasMultipleProjectInstances && (
+                <div className="size-5 flex items-center justify-center rounded-full bg-blue-500/10 text-blue-600 text-[10px] font-black">
+                  {projectInstanceCount}
                 </div>
-
-              </section>
-
-  
-
-              {/* Clean Resize Handle */}
-
-              {rightPanelOpen && (
-
-                <div
-
-                  role="separator"
-
-                  className={cn(
-
-                    'w-px h-full z-40 cursor-col-resize hover:bg-primary/30 transition-colors',
-
-                    resizingPanels ? 'bg-primary/50' : 'bg-border/30'
-
-                  )}
-
-                  onPointerDown={startPanelsResize}
-
-                  onPointerMove={movePanelsResize}
-
-                  onPointerUp={stopPanelsResize}
-
-                  onPointerCancel={stopPanelsResize}
-
-                />
-
               )}
-
-            </>
-
-          )}
-
-  
-
-          {/* Right Side: Workspace (Canvas) */}
-
-          <aside
-
-            className={cn(
-
-              'h-full flex flex-col bg-muted/5 transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]',
-
-              rightPanelOpen && project
-
-                ? 'flex-1 opacity-100'
-
-                : 'w-0 opacity-0 pointer-events-none translate-x-8',
-
-            )}
-
-          >
-
-            <div className="flex-1 flex flex-col min-w-0 h-full">
-
-              <div className="shrink-0 h-12 flex items-center justify-between px-3 border-b bg-background/50 backdrop-blur-sm">
-
-                <div className="flex items-center gap-1">
-
-                  {!fileManagerOpen && (
-
-                    <Button
-
-                      type="button"
-
-                      variant="ghost"
-
-                      size="icon-sm"
-
-                      className="text-muted-foreground hover:text-foreground"
-
-                      title="文件"
-
-                      onClick={() => setFileManagerOpen(true)}
-
-                    >
-
-                      <Folder className="size-4" />
-
-                    </Button>
-
-                  )}
-
-  
-
-                  <Button
-
-                    type="button"
-
-                    variant="ghost"
-
-                    size="icon-sm"
-
-                    className="text-muted-foreground hover:text-foreground"
-
-                    title="终端"
-
-                    onClick={() => openTerminal({ focus: true })}
-
-                  >
-
-                    <Terminal className="size-4" />
-
-                  </Button>
-
-  
-
-                  <Button
-
-                    type="button"
-
-                    variant="ghost"
-
-                    size="icon-sm"
-
-                    className="text-muted-foreground hover:text-foreground"
-
-                    title="输出"
-
-                    onClick={() => setActiveView({ kind: 'output' })}
-
-                  >
-
-                    <FileText className="size-4" />
-
-                  </Button>
-
-                </div>
-
-  
-
-                <Button
-
-                  type="button"
-
-                  variant="ghost"
-
-                  size="icon-sm"
-
-                  className="text-muted-foreground hover:text-foreground"
-
-                  onClick={() => handleRightPanelOpenChange(false)}
-
-                >
-
-                  <X className="size-4" />
-
-                </Button>
-
-              </div>
-
-  
-
-              <div ref={workspaceBodyRef} className="flex-1 min-h-0 flex overflow-hidden">
-
-                {fileManagerOpen && (
-
-                  <>
-
-                    <div className="shrink-0 overflow-hidden" style={{ width: fileManagerWidthPx }}>
-
-                      <ProjectFileManager
-
-                        workspacePath={workspacePath}
-
-                        projectId={project?.id ?? null}
-
-                        onRequestClose={() => setFileManagerOpen(false)}
-
-                        onOpenFile={openFile}
-
-                        onOpenDiff={openDiff}
-
-                        onOpenTerminal={(path) => openTerminal({ path, focus: true })}
-
-                        className="h-full"
-
-                      />
-
-                    </div>
-
-  
-
-                    <div
-
-                      role="separator"
-
-                      className={cn(
-
-                        'w-px cursor-col-resize hover:bg-primary/30 transition-colors',
-
-                        resizing ? 'bg-primary/50' : 'bg-border/30',
-
-                      )}
-
-                      onPointerDown={startResize}
-
-                      onPointerMove={moveResize}
-
-                      onPointerUp={stopResize}
-
-                      onPointerCancel={stopResize}
-
-                    />
-
-                  </>
-
-                )}
-
-  
-
-                <div className="min-w-0 flex-1 flex flex-col overflow-hidden bg-background">
-
-                  <div className="shrink-0 h-10 flex items-center px-2 border-b bg-muted/5">
-
-                    <TabStrip
-
-                      className="flex-1"
-
-                      items={mainTabs}
-
-                      activeKey={tryGetViewKey(activeView)}
-
-                      ariaLabel="Workspace tabs"
-
-                      onActivate={(tab) => {
-
-                        if (tab.kind === 'file') {
-
-                          setActiveView({ kind: 'file', path: tab.path })
-
-                          return
-
-                        }
-
-                        if (tab.kind === 'diff') {
-
-                          setActiveView({ kind: 'diff', file: tab.file, staged: tab.staged })
-
-                          return
-
-                        }
-
-                        if (tab.kind === 'terminal') {
-
-                          setActiveView({ kind: 'terminal', id: tab.id })
-
-                          return
-
-                        }
-
-                        setActiveView({ kind: 'panel', panelId: tab.panelId })
-
-                      }}
-
-                      onClose={(tab) => closeTab(tab)}
-
-                    />
-
-                  </div>
-
-  
-
-                  <div className="flex-1 min-h-0 overflow-hidden">{renderMain()}</div>
-
-                </div>
-
-              </div>
-
             </div>
+          </div>
 
-          </aside>
+          <div className="flex items-center gap-2">
+            {/* Workspace Toggle (Canvas) */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className={cn(
+                      "h-9 px-3 gap-2 rounded-xl transition-all",
+                      rightPanelOpen ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
+                    )}
+                    onClick={() => handleRightPanelOpenChange(!rightPanelOpen)}
+                  >
+                    <PanelRightOpen className={cn(
+                      "size-4 transition-transform duration-500",
+                      !rightPanelOpen && "rotate-180"
+                    )} />
+                    <span className="text-xs font-semibold">工作区</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="text-xs">
+                  {rightPanelOpen ? '收起工作区' : '打开工作区'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        </header>
+      )}
 
+
+      {error && !projectNotFound ? (
+        <div className="shrink-0 p-4">
+          <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 flex items-center justify-between gap-4">
+            <div className="text-sm text-destructive font-medium">{error}</div>
+            <Button variant="outline" size="sm" className="rounded-lg" onClick={() => void load()}>重试</Button>
+          </div>
         </div>
+      ) : null}
+      
+      {!id && !projectId ? (
+        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm font-medium">
+          未选择项目
+        </div>
+      ) : null}
+      
+      {id && projectNotFound && projectId ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8">
+          <div className="text-muted-foreground font-medium">项目未找到 (ID: {id})</div>
+          <Button variant="outline" className="rounded-xl px-6" onClick={() => void load()}>重试</Button>
+        </div>
+      ) : null}
+      
+      {/* Main Workspace Area */}
+      <div
+        ref={workspaceContainerRef}
+        className="flex-1 min-h-0 flex relative overflow-hidden"
+      >
+        {/* Left Side: Chat Interface */}
+        {leftPanelOpen && project && (
+          <>
+            <section
+              className={cn(
+                'h-full flex flex-col transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]',
+                rightPanelOpen ? 'shrink-0' : 'flex-1',
+              )}
+              style={rightPanelOpen ? { width: `${leftPanelWidth * 100}%` } : undefined}
+            >
+              <div className="h-full relative overflow-hidden">
+                <SessionAwareProjectChat
+                  key={effectiveSessionId ?? 'new'}
+                  project={project}
+                  detailsOpen={detailsOpen}
+                  detailsPortalTarget={detailsPortalTarget}
+                  activeFilePath={null}
+                  codeSelection={codeSelection}
+                  onClearCodeSelection={() => setCodeSelection(null)}
+                  currentToolType={currentToolType}
+                  showSessionPanel={true}
+                />
+              </div>
+            </section>
 
-  
-
-        {!leftPanelOpen && (
-
-          <Button
-
-            type="button"
-
-            variant="secondary"
-
-            size="icon"
-
-            className="fixed left-6 top-6 z-50 rounded-full shadow-xl animate-in fade-in zoom-in duration-300"
-
-            title="显示聊天"
-
-            onClick={() => setLeftPanelOpen(true)}
-
-          >
-
-            <PanelRightOpen className="size-5" />
-
-          </Button>
-
+            {/* Clean Resize Handle */}
+            {rightPanelOpen && (
+              <div
+                role="separator"
+                className={cn(
+                  'w-px h-full z-40 cursor-col-resize hover:bg-primary/30 transition-colors',
+                  resizingPanels ? 'bg-primary/50' : 'bg-border/30'
+                )}
+                onPointerDown={startPanelsResize}
+                onPointerMove={movePanelsResize}
+                onPointerUp={stopPanelsResize}
+                onPointerCancel={stopPanelsResize}
+              />
+            )}
+          </>
         )}
 
+
+        {/* Right Side: New WorkspaceLayout */}
+        <aside
+          className={cn(
+            'h-full flex flex-col bg-muted/5 transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]',
+            rightPanelOpen && project
+              ? 'flex-1 opacity-100'
+              : 'w-0 opacity-0 pointer-events-none translate-x-8',
+          )}
+        >
+          {rightPanelOpen && project && (
+            <WorkspaceLayout
+              workspacePath={workspacePath}
+              onCodeSelectionToChat={handleCodeSelectionToChat}
+              className="h-full"
+            />
+          )}
+        </aside>
       </div>
 
-    )
-
-  }
-
-  ,
+      {!leftPanelOpen && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          className="fixed left-6 top-6 z-50 rounded-full shadow-xl animate-in fade-in zoom-in duration-300"
+          title="显示聊天"
+          onClick={() => setLeftPanelOpen(true)}
+        >
+          <PanelRightOpen className="size-5" />
+        </Button>
+      )}
+    </div>
+  )
+},
 )

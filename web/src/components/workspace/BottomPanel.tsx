@@ -1,8 +1,12 @@
+import { Suspense } from 'react'
 import { cn } from '@/lib/utils'
 import { Terminal, FileOutput, AlertCircle, ChevronDown, X } from 'lucide-react'
 import { useWorkspaceStore, type PanelTab } from '@/stores/workspaceStore'
-import { TerminalPanel } from './TerminalPanel'
-import { OutputPanel } from './OutputPanel'
+import { 
+  LazyTerminalPanel, 
+  LazyOutputPanel, 
+  PanelLoadingFallback 
+} from './LazyComponents'
 
 /**
  * 面板标签配置
@@ -26,6 +30,8 @@ const panelTabs: PanelTabConfig[] = [
  * BottomPanel 组件属性
  */
 export interface BottomPanelProps {
+  /** 工作区路径 */
+  workspacePath?: string
   /** 自定义类名 */
   className?: string
 }
@@ -38,7 +44,7 @@ export interface BottomPanelProps {
  * - 面板展开/折叠
  * - 高度拖拽调整
  */
-export function BottomPanel({ className }: BottomPanelProps) {
+export function BottomPanel({ workspacePath, className }: BottomPanelProps) {
   const panelVisible = useWorkspaceStore((state) => state.panelVisible)
   const panelHeight = useWorkspaceStore((state) => state.panelHeight)
   const activePanelTab = useWorkspaceStore((state) => state.activePanelTab)
@@ -51,14 +57,22 @@ export function BottomPanel({ className }: BottomPanelProps) {
   }
 
   /**
-   * 渲染面板内容
+   * 渲染面板内容（使用懒加载）
    */
   const renderPanelContent = () => {
     switch (activePanelTab) {
       case 'terminal':
-        return <TerminalPanel />
+        return (
+          <Suspense fallback={<PanelLoadingFallback />}>
+            <LazyTerminalPanel workspacePath={workspacePath} />
+          </Suspense>
+        )
       case 'output':
-        return <OutputPanel />
+        return (
+          <Suspense fallback={<PanelLoadingFallback />}>
+            <LazyOutputPanel />
+          </Suspense>
+        )
       case 'problems':
         return (
           <div className="flex items-center justify-center h-full text-sm text-muted-foreground">

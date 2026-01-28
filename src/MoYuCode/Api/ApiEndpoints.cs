@@ -1328,6 +1328,233 @@ public static class ApiEndpoints
                 windowTitle: $"MoYuCode（摸鱼Coding） - Terminal - {directoryInfo.Name}",
                 environment: null);
         });
+
+        fs.MapPost("/search", async ([FromBody] ContentSearchRequest request, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Path is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.Query))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Query is required.");
+            }
+
+            var normalizedPath = request.Path.Trim();
+            if (!Directory.Exists(normalizedPath))
+            {
+                throw new ApiHttpException(StatusCodes.Status400BadRequest, "Directory does not exist.");
+            }
+
+            var query = request.Query;
+            var isRegex = request.IsRegex;
+            var caseSensitive = request.CaseSensitive;
+            var maxResults = Math.Clamp(request.MaxResults, 1, 1000);
+
+            // 验证正则表达式
+            System.Text.RegularExpressions.Regex? regex = null;
+            if (isRegex)
+            {
+                try
+                {
+                    var regexOptions = caseSensitive
+                        ? System.Text.RegularExpressions.RegexOptions.None
+                        : System.Text.RegularExpressions.RegexOptions.IgnoreCase;
+                    regex = new System.Text.RegularExpressions.Regex(query, regexOptions, TimeSpan.FromSeconds(5));
+                }
+                catch (ArgumentException)
+                {
+                    throw new ApiHttpException(StatusCodes.Status400BadRequest, "Invalid regular expression.");
+                }
+            }
+
+            var matches = new List<ContentSearchMatch>();
+            var totalMatches = 0;
+            var truncated = false;
+
+            // 搜索文件
+            await Task.Run(() =>
+            {
+                var searchComparison = caseSensitive
+                    ? StringComparison.Ordinal
+                    : StringComparison.OrdinalIgnoreCase;
+
+                foreach (var filePath in EnumerateSearchableFiles(normalizedPath))
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    try
+                    {
+                        var lines = File.ReadLines(filePath);
+                        var lineNumber = 0;
+
+                        foreach (var line in lines)
+                        {
+                            lineNumber++;
+
+                            if (cancellationToken.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            // 跳过过长的行
+                            if (line.Length > 10000)
+                            {
+                                continue;
+                            }
+
+                            int matchStart = -1;
+                            int matchEnd = -1;
+
+                            if (isRegex && regex != null)
+                            {
+                                var match = regex.Match(line);
+                                if (match.Success)
+                                {
+                                    matchStart = match.Index;
+                                    matchEnd = match.Index + match.Length;
+                                }
+                            }
+                            else
+                            {
+                                var index = line.IndexOf(query, searchComparison);
+                                if (index >= 0)
+                                {
+                                    matchStart = index;
+                                    matchEnd = index + query.Length;
+                                }
+                            }
+
+                            if (matchStart >= 0)
+                            {
+                                totalMatches++;
+
+                                if (matches.Count < maxResults)
+                                {
+                                    // 截断过长的行内容
+                                    var displayLine = line.Length > 500 ? line[..500] + "..." : line;
+                                    matches.Add(new ContentSearchMatch(
+                                        FilePath: filePath,
+                                        LineNumber: lineNumber,
+                                        LineContent: displayLine,
+                                        MatchStart: Math.Min(matchStart, displayLine.Length),
+                                        MatchEnd: Math.Min(matchEnd, displayLine.Length)
+                                    ));
+                                }
+                                else
+                                {
+                                    truncated = true;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // 忽略无法读取的文件
+                    }
+                }
+            }, cancellationToken);
+
+            return new ContentSearchResponse(
+                Query: query,
+                IsRegex: isRegex,
+                CaseSensitive: caseSensitive,
+                Matches: matches,
+                TotalMatches: totalMatches,
+                Truncated: truncated
+            );
+        });
+    }
+
+    /// <summary>
+    /// 枚举可搜索的文件（排除二进制文件、隐藏文件、node_modules 等）
+    /// </summary>
+    private static IEnumerable<string> EnumerateSearchableFiles(string rootPath)
+    {
+        var excludedDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "node_modules", ".git", ".svn", ".hg", "bin", "obj", "dist", "build",
+            ".vs", ".vscode", ".idea", "__pycache__", ".cache", "coverage",
+            "packages", "vendor", ".nuget", "TestResults"
+        };
+
+        var includedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".cs", ".ts", ".tsx", ".js", ".jsx", ".json", ".xml", ".html", ".css", ".scss", ".less",
+            ".md", ".txt", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+            ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp",
+            ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+            ".sql", ".graphql", ".proto", ".vue", ".svelte",
+            ".env", ".gitignore", ".dockerignore", ".editorconfig",
+            ".csproj", ".sln", ".slnx", ".fsproj", ".vbproj"
+        };
+
+        var stack = new Stack<string>();
+        stack.Push(rootPath);
+
+        while (stack.Count > 0)
+        {
+            var currentDir = stack.Pop();
+
+            // 枚举子目录
+            IEnumerable<string> subDirs;
+            try
+            {
+                subDirs = Directory.EnumerateDirectories(currentDir);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var subDir in subDirs)
+            {
+                var dirName = Path.GetFileName(subDir);
+                if (!string.IsNullOrEmpty(dirName) &&
+                    !dirName.StartsWith('.') &&
+                    !excludedDirs.Contains(dirName))
+                {
+                    stack.Push(subDir);
+                }
+            }
+
+            // 枚举文件
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(currentDir);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var file in files)
+            {
+                var ext = Path.GetExtension(file);
+                var fileName = Path.GetFileName(file);
+
+                // 包含无扩展名的常见配置文件
+                if (string.IsNullOrEmpty(ext))
+                {
+                    var lowerName = fileName.ToLowerInvariant();
+                    if (lowerName is "dockerfile" or "makefile" or "rakefile" or "gemfile" or "procfile")
+                    {
+                        yield return file;
+                    }
+                    continue;
+                }
+
+                if (includedExtensions.Contains(ext))
+                {
+                    yield return file;
+                }
+            }
+        }
     }
 
     private static void MapProviders(RouteGroupBuilder api)

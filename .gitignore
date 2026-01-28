@@ -13,3 +13,4 @@ src/MoYuCode/wwwroot/
 node_modules
 /.vs/MoYuCode.slnx
 *.DotSettings.user
+.vs
